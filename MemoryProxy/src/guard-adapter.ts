@@ -238,7 +238,8 @@ export function joinUrl(base: string, requestPath: string): string {
   // agentUpstreams 或完整 endpoint base 已含路径时勿再拼接。
   if (
     baseWithoutQuery.endsWith("/messages") ||
-    baseWithoutQuery.endsWith("/chat/completions")
+    baseWithoutQuery.endsWith("/chat/completions") ||
+    baseWithoutQuery.endsWith("/responses")
   ) {
     return normalizedBase;
   }
@@ -251,7 +252,9 @@ export function joinUrl(base: string, requestPath: string): string {
   // Fallback: 按请求路径后缀推断 Anthropic / OpenAI endpoint。
   const endpoint = requestPath.endsWith("/messages")
     ? "/messages"
-    : "/chat/completions";
+    : requestPath.endsWith("/responses")
+      ? "/responses"
+      : "/chat/completions";
   log.warn("joinUrl.fallback", { requestPath, endpoint });
   return `${normalizedBase}${endpoint}`;
 }

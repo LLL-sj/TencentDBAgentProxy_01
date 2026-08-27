@@ -140,6 +140,55 @@ export function migrate(_db: Db, raw: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_kcga_cg_version
       ON knowledge_code_graph_audit(code_graph_id, version DESC);
 
+    CREATE TABLE IF NOT EXISTS team_notes (
+      note_id        TEXT PRIMARY KEY,
+      service_id     TEXT NOT NULL,
+      team_id        TEXT NOT NULL,
+      seq_no         INTEGER NOT NULL,
+      title          TEXT NOT NULL,
+      filename       TEXT NOT NULL,
+      content_md     TEXT NOT NULL,
+      content_hash   TEXT NOT NULL,
+      author_user_id TEXT NOT NULL,
+      version        INTEGER NOT NULL DEFAULT 1,
+      status         TEXT NOT NULL DEFAULT 'active',
+      created_at     TEXT NOT NULL,
+      updated_at     TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_team_notes_team_seq
+      ON team_notes(service_id, team_id, seq_no);
+
+    CREATE INDEX IF NOT EXISTS idx_team_notes_team_status_created
+      ON team_notes(service_id, team_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS team_note_tags (
+      note_id    TEXT NOT NULL,
+      tag_slug   TEXT NOT NULL,
+      tag_label  TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_team_note_tags_note_slug
+      ON team_note_tags(note_id, tag_slug);
+
+    CREATE INDEX IF NOT EXISTS idx_team_note_tags_slug_note
+      ON team_note_tags(tag_slug, note_id);
+
+    CREATE TABLE IF NOT EXISTS team_note_revisions (
+      revision_id TEXT PRIMARY KEY,
+      note_id     TEXT NOT NULL,
+      version     INTEGER NOT NULL,
+      title       TEXT NOT NULL,
+      content_md  TEXT NOT NULL,
+      tags_json   TEXT NOT NULL,
+      edited_by   TEXT NOT NULL,
+      created_at  TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_team_note_revisions_note_version
+      ON team_note_revisions(note_id, version);
+
     CREATE TABLE IF NOT EXISTS llm_binding (
       service_id     TEXT PRIMARY KEY,
       mode           TEXT NOT NULL DEFAULT 'proxy',

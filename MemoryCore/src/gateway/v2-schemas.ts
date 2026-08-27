@@ -112,6 +112,8 @@ import {
 /** conversationAdd with session_id defaulting to compatibility bucket. */
 export const conversationAddRequestSchema = z.object({
   session_id: z.string().min(1).default(DEFAULT_ISOLATION_ID),
+  /** Per-session memory capture mode passed through from the proxy header. */
+  memory_mode: z.enum(["chat", "code", "all", "none"]).optional(),
   messages: z.array(_conversationItemSchema).min(1).max(100),
 });
 export type ConversationAddRequest = z.infer<typeof conversationAddRequestSchema>;

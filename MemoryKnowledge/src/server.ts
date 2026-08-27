@@ -26,6 +26,7 @@ import { createToolsRoutes } from "./routes/tools.js";
 import { createHealthRoutes } from "./routes/health.js";
 import { createLlmBindingRoutes } from "./routes/llm-binding.js";
 import { createAutoSyncRoutes } from "./routes/auto-sync.js";
+import { createNotesRoutes } from "./routes/notes.js";
 import { accessLog } from "./middleware/response-envelope.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createLogger } from "./logger.js";
@@ -73,6 +74,11 @@ export function createApp() {
     wikiMgr: knowledgeModule.wikiMgr,
     cgService: knowledgeModule.cgService,
     instancePool: knowledgeModule.instancePool,
+  }));
+
+  // team notes — lightweight team-shared markdown notes (no LLM ingest)
+  api.route("/notes", createNotesRoutes({
+    notesService: knowledgeModule.notesService,
   }));
 
   // internal/* — control-plane endpoints (TMC / operator). Per-instance LLM routing.

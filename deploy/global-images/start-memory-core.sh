@@ -10,6 +10,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=./_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
@@ -31,6 +32,14 @@ ADMIN_KEY_FILE="${MEMORY_CORE_ADMIN_KEY_FILE:-$SCRIPT_DIR/.admin-key}"
 if [[ -n "$MEMORY_CORE_GATEWAY_API_KEY" ]]; then
   warn "MEMORY_CORE_GATEWAY_API_KEY 非空 —— proxy 的 sessionInit/auth 目前会因缺 Bearer 而失败。"
   warn "本地体验请把 .env 里的 MEMORY_CORE_GATEWAY_API_KEY 留空。"
+fi
+
+# 服务器模式：镜像已包含全部源码，默认不挂载仓库源码；本地开发热更新才设为 1。
+DEV_SOURCE_MOUNTS="${TDAI_DEV_SOURCE_MOUNTS:-0}"
+RESTART_POLICY="${TDAI_RESTART_POLICY:-no}"
+TZ_ARGS=()
+if [[ -n "${TDAI_TZ:-}" ]]; then
+  TZ_ARGS=(-e "TZ=$TDAI_TZ")
 fi
 
 CONTAINER=tdai-memory-core
@@ -72,25 +81,27 @@ llm:
   timeoutMs: 300000
 
 memory:
-  # promptMode: chat（默认，通用聊天/教学场景）| code（代码工程场景，
-  # LLM 会重点抽"改了什么/发现什么问题/工具用法"，普通聊天可能抽出 0 条）
-  # 通过 .env 里 MEMORY_PROMPT_MODE 覆盖。
-  promptMode: ${MEMORY_PROMPT_MODE:-chat}
+  # promptMode: chat（通用聊天/教学场景）| code（项目/代码工程 Agent 记忆，
+  # LLM 抽 work_fact/work_task/work_method/work_artifact，项目对话不抽个人画像）
+  # 本项目默认 code；通过 .env 里 MEMORY_PROMPT_MODE 覆盖。
+  promptMode: ${MEMORY_PROMPT_MODE:-code}
+  codeMemoryVersion: ${MEMORY_CODE_MEMORY_VERSION:-v1}
   capture: { enabled: true }
   extraction:
     enabled: true
     enableDedup: true
     maxMemoriesPerSession: 20
   persona:
-    triggerEveryN: 50
+    triggerEveryN: ${MEMORY_L3_TRIGGER_EVERY_N:-10}
     maxScenes: 15
   pipeline:
-    everyNConversations: 5
-    enableWarmup: true
-    l1IdleTimeoutSeconds: 600
-    l2DelayAfterL1Seconds: 90
-    l2MinIntervalSeconds: 900
-    l2MaxIntervalSeconds: 3600
+    everyNConversations: ${MEMORY_L1_EVERY_N:-5}
+    enableWarmup: ${MEMORY_PIPELINE_WARMUP:-true}
+    l1IdleTimeoutSeconds: ${MEMORY_L1_IDLE_TIMEOUT_SECONDS:-240}
+    l2DelayAfterL1Seconds: ${MEMORY_L2_DELAY_AFTER_L1_SECONDS:-30}
+    l2MinIntervalSeconds: ${MEMORY_L2_MIN_INTERVAL_SECONDS:-180}
+    l2MaxIntervalSeconds: ${MEMORY_L2_MAX_INTERVAL_SECONDS:-600}
+    sessionActiveWindowHours: ${MEMORY_SESSION_ACTIVE_WINDOW_HOURS:-3}
   recall:
     enabled: true
     maxResults: 5
@@ -100,6 +111,33 @@ memory:
   storeBackend: sqlite
   embedding:
     provider: none
+  # Code Memory v2 L1 短文本（默认值与 config.ts 保持一致）
+  l1V2:
+    summaryTipBlockTemplate: |-
+      <SUMMARY_TIP id="{{tip_id}}" covers="{{l0_start_ref}}..{{l0_end_ref}}" tags="{{tags_csv}}">
+      {{summary}}
+      </SUMMARY_TIP>
+    noSummaryTipsText: ${MEMORY_L1_V2_NO_SUMMARY_TIPS_TEXT:-（本批没有 Agent 提交的 SUMMARY_TIP）}
+    summaryTipRuleText: ${MEMORY_L1_V2_SUMMARY_TIP_RULE_TEXT:-SUMMARY_TIP 是 Agent 对一段 L0 的高质量压缩总结，默认可信：L0 完整时用于确认重点和补全归纳；L0 不完整或已消费过时，可直接以 SUMMARY_TIP 为主提取。}
+
+  # Code Memory v2 project experience packager（默认关，v1 行为不变）
+  projectMemory:
+    enabled: ${MEMORY_PROJECT_MEMORY_ENABLED:-false}
+    minPendingTips: ${MEMORY_PROJECT_MEMORY_MIN_PENDING_TIPS:-3}
+    minDistinctSessions: ${MEMORY_PROJECT_MEMORY_MIN_DISTINCT_SESSIONS:-2}
+    packagerMinIntervalSeconds: ${MEMORY_PROJECT_MEMORY_MIN_INTERVAL_SECONDS:-300}
+    packagerMaxIntervalSeconds: ${MEMORY_PROJECT_MEMORY_MAX_INTERVAL_SECONDS:-14400}
+    maxTopics: ${MEMORY_PROJECT_MEMORY_MAX_TOPICS:-15}
+    indexMaxChars: ${MEMORY_PROJECT_MEMORY_INDEX_MAX_CHARS:-6000}
+    topicMaxChars: ${MEMORY_PROJECT_MEMORY_TOPIC_MAX_CHARS:-4000}
+
+  # L0.5 task-summary tips（Code Memory v2）
+  tips:
+    enabled: ${MEMORY_TIPS_ENABLED:-true}
+    reminderEnabled: ${MEMORY_TIPS_REMINDER_ENABLED:-true}
+    maxReminderPerTask: ${MEMORY_TIPS_MAX_REMINDER_PER_TASK:-50}
+    reminderCooldownSeconds: ${MEMORY_TIPS_REMINDER_COOLDOWN_SECONDS:-600}
+    submitPath: /memory-bridge/v3/tips/submit
 
 # ── Skill 模块 ──
 skill:
@@ -121,11 +159,44 @@ skill:
     maxResourceSizeBytes: 5000000
 YAML
 
-info "启动 memory-core (image=$MEMORY_CORE_IMAGE, port=$MEMORY_CORE_PORT)"
+info "启动 memory-core (image=$MEMORY_CORE_IMAGE, port=$MEMORY_CORE_PORT, sourceMounts=$DEV_SOURCE_MOUNTS)"
+if [[ "$DEV_SOURCE_MOUNTS" == "1" ]]; then
 $DOCKER run -d --name "$CONTAINER" \
   --network "$NETWORK" \
   --network-alias memory-core \
+  --restart "$RESTART_POLICY" \
   -p "${MEMORY_CORE_PORT}:8420" \
+  "${TZ_ARGS[@]}" \
+  -v "${MEMORY_CORE_VOLUME}:/data/tdai-memory" \
+  -v "$CORE_CONFIG_FILE:/data/config/tdai-gateway.yaml:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/config.ts:/app/src/config.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/store/sqlite.ts:/app/src/core/store/sqlite.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/record/l1-extractor.ts:/app/src/core/record/l1-extractor.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/utils/pipeline-factory.ts:/app/src/utils/pipeline-factory.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/utils/project-memory-packager.ts:/app/src/utils/project-memory-packager.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/tdai-core.ts:/app/src/core/tdai-core.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/prompts:/app/src/core/prompts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/tips:/app/src/core/tips:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/gateway/v2-router.ts:/app/src/gateway/v2-router.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/gateway/v2-schemas.ts:/app/src/gateway/v2-schemas.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/gateway/server.ts:/app/src/gateway/server.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/memory-mode.ts:/app/src/core/memory-mode.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/state/types.ts:/app/src/core/state/types.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/core/state/local-backend.ts:/app/src/core/state/local-backend.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/utils/checkpoint.ts:/app/src/utils/checkpoint.ts:ro" \
+  -v "$REPO_ROOT/MemoryCore/src/utils/stateful-pipeline-manager.ts:/app/src/utils/stateful-pipeline-manager.ts:ro" \
+  -e TDAI_GATEWAY_PORT=8420 \
+  -e TDAI_GATEWAY_HOST=0.0.0.0 \
+  -e TDAI_GATEWAY_API_KEY="$MEMORY_CORE_GATEWAY_API_KEY" \
+  -e TDAI_DATA_DIR=/data/tdai-memory \
+  "$MEMORY_CORE_IMAGE" >/dev/null
+else
+$DOCKER run -d --name "$CONTAINER" \
+  --network "$NETWORK" \
+  --network-alias memory-core \
+  --restart "$RESTART_POLICY" \
+  -p "${MEMORY_CORE_PORT}:8420" \
+  "${TZ_ARGS[@]}" \
   -v "${MEMORY_CORE_VOLUME}:/data/tdai-memory" \
   -v "$CORE_CONFIG_FILE:/data/config/tdai-gateway.yaml:ro" \
   -e TDAI_GATEWAY_PORT=8420 \
@@ -133,6 +204,7 @@ $DOCKER run -d --name "$CONTAINER" \
   -e TDAI_GATEWAY_API_KEY="$MEMORY_CORE_GATEWAY_API_KEY" \
   -e TDAI_DATA_DIR=/data/tdai-memory \
   "$MEMORY_CORE_IMAGE" >/dev/null
+fi
 
 wait_healthy "$CONTAINER" 90
 ok "memory-core 已启动 → http://localhost:${MEMORY_CORE_PORT}/"

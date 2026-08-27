@@ -28,10 +28,14 @@ export type {
 export {
   genWikiId,
   genCodeGraphId,
+  genNoteId,
+  genRevisionId,
   isWikiId,
   isCodeGraphId,
+  isNoteId,
   WIKI_ID_PREFIX,
   CODE_GRAPH_ID_PREFIX,
+  NOTE_ID_PREFIX,
 } from "./ids.js";
 
 export { BuildQueue } from "./build-queue.js";
@@ -78,3 +82,16 @@ export type {
 
 export { AutoSyncScheduler, resolveAutoSyncConfig } from "./auto-sync-scheduler.js";
 export type { AutoSyncConfig, AutoSyncSchedulerDeps } from "./auto-sync-scheduler.js";
+
+export { TeamNotesService, TeamNotesError, normalizeTags } from "./team-notes-service.js";
+export type {
+  CreateNoteInput,
+  UpdateNoteInput,
+  NoteDetail,
+  NoteSummary,
+  NoteListResult,
+  TagSummary,
+  NotesGraph,
+  NotesGraphNode,
+  NotesGraphEdge,
+} from "./team-notes-service.js";

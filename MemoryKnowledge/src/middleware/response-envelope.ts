@@ -44,8 +44,8 @@ export function accessLog(): MiddlewareHandler {
       try {
         const raw = await c.req.text();
         reqBody = raw ? JSON.parse(raw) : undefined;
-        c.req.bodyCache.text = Promise.resolve(raw);
-        if (reqBody) c.req.bodyCache.json = Promise.resolve(reqBody);
+        c.req.bodyCache.text = Promise.resolve(raw) as any;
+        if (reqBody) c.req.bodyCache.json = Promise.resolve(reqBody) as any;
       } catch {
         // 非 JSON body，忽略
       }

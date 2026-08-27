@@ -32,6 +32,7 @@ CTX_DIR="${CTX_DIR:-$WORKSPACE_ROOT/panel-knowledge-builder}"
 KEEP_CTX="${KEEP_CTX:-0}"
 PREPARE_ONLY="${PREPARE_ONLY:-0}"
 PLATFORM="${PLATFORM:-linux/amd64}"
+APT_MIRROR="${APT_MIRROR:-mirrors.aliyun.com}"
 
 err() { echo "[build-combined] error: $*" >&2; exit 1; }
 
@@ -124,8 +125,8 @@ if [[ "$PREPARE_ONLY" == "1" ]]; then
 fi
 
 # build
-echo "[build-combined] docker build --platform $PLATFORM -t $IMAGE_NAME:$IMAGE_TAG $CTX_DIR"
-docker build --platform "$PLATFORM" -t "$IMAGE_NAME:$IMAGE_TAG" "$CTX_DIR"
+echo "[build-combined] docker build --platform $PLATFORM --build-arg APT_MIRROR=$APT_MIRROR -t $IMAGE_NAME:$IMAGE_TAG $CTX_DIR"
+docker build --platform "$PLATFORM" --build-arg "APT_MIRROR=$APT_MIRROR" -t "$IMAGE_NAME:$IMAGE_TAG" "$CTX_DIR"
 
 echo ""
 echo "[build-combined] ✅ done: $IMAGE_NAME:$IMAGE_TAG"

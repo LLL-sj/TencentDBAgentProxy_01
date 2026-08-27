@@ -75,11 +75,13 @@ export const chatMemoryApi = {
     offset = 0,
     path?: string,
     beforeTs?: string,
+    memoryMode?: 'chat' | 'code',
   ) =>
     chatMemoryCall<{ layer: string; items: ChatMemoryLayerItem[]; total: number; limit: number; offset: number }>('layer', {
       block_id: blockId, layer: l, limit, offset,
       ...(path ? { path } : {}),
       ...(beforeTs ? { before_ts: beforeTs } : {}),
+      ...(l === 'L1' && memoryMode ? { memory_mode: memoryMode } : {}),
     }),
 
   /** 批量设置某个 agent 的固定 memory，后端会原子校验借入上限。 */

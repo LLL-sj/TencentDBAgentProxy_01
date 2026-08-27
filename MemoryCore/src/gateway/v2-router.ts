@@ -16,6 +16,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type http from "node:http";
+import type { DatabaseSync } from "node:sqlite";
 import { classifyError } from "./error-handler.js";
 import type { IMemoryStore, L0Record, ProfileSyncRecord } from "../core/store/types.js";
 import type { EmbeddingService } from "../core/store/embedding.js";
@@ -28,6 +29,7 @@ import { executeMemorySearch } from "../core/tools/memory-search.js";
 import { executeConversationSearch } from "../core/tools/conversation-search.js";
 import type { MemoryRecord } from "../core/record/l1-writer.js";
 import { reportRecallMetrics } from "../core/report/metric-tracking-recall.js";
+import { SummaryTipsError, SummaryTipsStore } from "../core/tips/summary-tips.js";
 
 // ── Zod schemas (validated types + defaults) ──
 import {
@@ -94,6 +96,12 @@ import {
 } from "./v2-schemas.js";
 import { stripSceneNavigation } from "../core/scene/scene-navigation.js";
 import { buildProfileIsolationScope, buildProfileStableId, DEFAULT_PROFILE_SCOPE } from "../core/profile/profile-sync.js";
+import {
+  listProjectTopics,
+  readProjectMemoryIndex,
+  readProjectTopic,
+  searchProjectTopics,
+} from "../utils/project-memory-packager.js";
 
 const TAG = "[tdai-gateway][v2]";
 const V2_PREFIX = "/v2";
@@ -169,6 +177,12 @@ const V3_ALLOWED_SUBPATHS = new Set<string>([
   "/core/read",
   "/core/write",
   "/core/count",
+  "/tips/submit",
+  "/tips/list",
+  "/tips/get",
+  "/project/list",
+  "/project/read",
+  "/project/search",
 ]);
 
 /**
@@ -257,7 +271,7 @@ export interface V2RouterDeps {
    *   - standalone: LocalStateBackend (single-process, default)
    * When absent (misconfiguration), v2 add writes L0 only — pipeline is not triggered.
    */
-  notifyPipeline?: (instanceId: string, sessionId: string, messageCount: number, teamId?: string, agentId?: string) => Promise<void>;
+  notifyPipeline?: (instanceId: string, sessionId: string, messageCount: number, teamId?: string, agentId?: string, memoryMode?: string) => Promise<void>;
 
   /** Quota manager for memory/credit limit checks and usage reporting (service mode). */
   quotaManager?: import("../core/quota/quota-manager.js").QuotaManager;
@@ -428,6 +442,199 @@ const DATAPLANE_HANDLERS: Record<string, RouteHandler> = {
   "/core/count": handleCoreCount,
 };
 
+// ============================
+// L0.5 Summary Tips handlers
+// ============================
+
+interface RawDbCarrier {
+  getRawDb?: () => DatabaseSync;
+}
+
+function getTipsDb(store: IMemoryStore | undefined): DatabaseSync | null {
+  if (!store) return null;
+  const carrier = store as IMemoryStore & RawDbCarrier;
+  if (typeof carrier.getRawDb !== "function") return null;
+  try {
+    return carrier.getRawDb();
+  } catch {
+    return null;
+  }
+}
+
+function tipBodyString(body: unknown, key: string): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function tipBodyStringArray(body: unknown, key: string): string[] | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string" && item.trim()) out.push(item.trim());
+  }
+  return out;
+}
+
+function tipAnchor(body: unknown): { mode: "last_turn" | "message_text"; start_text?: string; end_text?: string } | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const value = (body as Record<string, unknown>).anchor;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const anchor = value as Record<string, unknown>;
+  const mode = anchor.mode;
+  if (mode !== "last_turn" && mode !== "message_text") return undefined;
+  const out: { mode: "last_turn" | "message_text"; start_text?: string; end_text?: string } = { mode };
+  if (typeof anchor.start_text === "string") out.start_text = anchor.start_text;
+  if (typeof anchor.end_text === "string") out.end_text = anchor.end_text;
+  return out;
+}
+
+async function handleTipsSubmit(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const iso = deps.requestIsolation;
+  const store = deps.getStore();
+  const db = getTipsDb(store);
+  if (!db) return errorEnvelope(503, "summary_tips requires a SQLite-backed memory store", requestId);
+
+  const teamId = tipBodyString(body, "team_id") ?? iso?.teamId;
+  const userId = tipBodyString(body, "user_id") ?? iso?.userId;
+  const agentId = tipBodyString(body, "agent_id") ?? iso?.agentId;
+  const sessionId = tipBodyString(body, "session_id") ?? iso?.sessionId;
+  const summary = tipBodyString(body, "summary");
+  if (!teamId || !userId || !agentId || !sessionId || !summary) {
+    return errorEnvelope(400, "team_id, user_id, agent_id, session_id and summary are required", requestId);
+  }
+
+  try {
+    const tips = new SummaryTipsStore(db);
+    const result = tips.submit({
+      teamId,
+      userId,
+      agentId,
+      sessionId,
+      taskId: tipBodyString(body, "task_id") ?? iso?.taskId,
+      summary,
+      steps: tipBodyStringArray(body, "steps"),
+      artifacts: tipBodyStringArray(body, "artifacts"),
+      tags: tipBodyStringArray(body, "tags"),
+      userFeedbackReceived: Boolean((body as Record<string, unknown>).user_feedback_received === true),
+      anchor: tipAnchor(body),
+      l0StartRef: tipBodyString(body, "l0_start_ref"),
+      l0EndRef: tipBodyString(body, "l0_end_ref"),
+      l0Refs: tipBodyStringArray(body, "l0_refs"),
+    });
+    return successEnvelope(result, requestId);
+  } catch (err) {
+    if (err instanceof SummaryTipsError) return errorEnvelope(err.code, err.message, requestId);
+    throw err;
+  }
+}
+
+async function handleTipsList(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const store = deps.getStore();
+  const db = getTipsDb(store);
+  if (!db) return errorEnvelope(503, "summary_tips requires a SQLite-backed memory store", requestId);
+  const teamId = tipBodyString(body, "team_id") ?? deps.requestIsolation?.teamId;
+  if (!teamId) return errorEnvelope(400, "team_id is required", requestId);
+  const tips = new SummaryTipsStore(db);
+  const raw = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const limit = typeof raw.limit === "number" && Number.isFinite(raw.limit) ? Math.floor(raw.limit) : 20;
+  const offset = typeof raw.offset === "number" && Number.isFinite(raw.offset) ? Math.floor(raw.offset) : 0;
+  const status = tipBodyString(body, "status") as "pending" | "consuming" | "consumed" | "duplicate" | "expired" | undefined;
+  return successEnvelope(tips.list({
+    teamId,
+    sessionId: tipBodyString(body, "session_id"),
+    taskId: tipBodyString(body, "task_id"),
+    status: status && ["pending", "consuming", "consumed", "duplicate", "expired"].includes(status) ? status : undefined,
+    limit,
+    offset,
+  }), requestId);
+}
+
+async function handleTipsGet(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const store = deps.getStore();
+  const db = getTipsDb(store);
+  if (!db) return errorEnvelope(503, "summary_tips requires a SQLite-backed memory store", requestId);
+  const teamId = tipBodyString(body, "team_id") ?? deps.requestIsolation?.teamId;
+  const tipId = tipBodyString(body, "tip_id");
+  if (!teamId || !tipId) return errorEnvelope(400, "team_id and tip_id are required", requestId);
+  const tips = new SummaryTipsStore(db);
+  const detail = tips.get(teamId, tipId);
+  if (!detail) return errorEnvelope(404, "tip not found", requestId);
+  return successEnvelope(detail, requestId);
+}
+
+// ============================
+// Code Memory v2 Project Memory Handlers
+// ============================
+
+function projectStorageFor(deps: V2RouterDeps, teamId: string, agentId: string): StorageAdapter | undefined {
+  const base = deps.getStorage();
+  if (!base) return undefined;
+  const scope = buildProfileIsolationScope({ teamId, agentId });
+  return createScopedStorageAdapter(base, `profiles/${encodeURIComponent(scope)}/`);
+}
+
+async function handleProjectList(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const iso = deps.requestIsolation;
+  if (!iso?.teamId || !iso.agentId) return errorEnvelope(400, "team_id and agent_id are required", requestId);
+  const storage = projectStorageFor(deps, iso.teamId, iso.agentId);
+  if (!storage) return errorEnvelope(503, "storage adapter is not available", requestId);
+  try {
+    // Sequential: listProjectTopics may flatten nested LLM paths and rebuild
+    // a stale MEMORY.md before we read it.
+    const items = await listProjectTopics("", storage);
+    const index = await readProjectMemoryIndex("", storage);
+    return successEnvelope({ items, index }, requestId);
+  } catch (err) {
+    return errorEnvelope(500, `project list failed: ${err instanceof Error ? err.message : String(err)}`, requestId);
+  }
+}
+
+async function handleProjectRead(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const iso = deps.requestIsolation;
+  if (!iso?.teamId || !iso.agentId) return errorEnvelope(400, "team_id and agent_id are required", requestId);
+  const raw = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const topicPath = typeof raw.path === "string" ? raw.path : "";
+  if (!topicPath.trim()) return errorEnvelope(400, "path is required", requestId);
+  const storage = projectStorageFor(deps, iso.teamId, iso.agentId);
+  if (!storage) return errorEnvelope(503, "storage adapter is not available", requestId);
+  try {
+    const topic = await readProjectTopic("", storage, topicPath);
+    if (!topic) return errorEnvelope(404, "project topic not found", requestId);
+    return successEnvelope({
+      path: topic.path,
+      name: topic.name,
+      type: topic.type,
+      title: topic.title,
+      tags: topic.tags,
+      sources: topic.sources,
+      updated: topic.updated,
+      content: topic.content,
+    }, requestId);
+  } catch (err) {
+    return errorEnvelope(500, `project read failed: ${err instanceof Error ? err.message : String(err)}`, requestId);
+  }
+}
+
+async function handleProjectSearch(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const iso = deps.requestIsolation;
+  if (!iso?.teamId || !iso.agentId) return errorEnvelope(400, "team_id and agent_id are required", requestId);
+  const raw = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const query = typeof raw.query === "string" ? raw.query : "";
+  const tags = Array.isArray(raw.tags) ? raw.tags.filter((x): x is string => typeof x === "string") : [];
+  const limit = typeof raw.limit === "number" && Number.isFinite(raw.limit) ? Math.floor(raw.limit) : 20;
+  const storage = projectStorageFor(deps, iso.teamId, iso.agentId);
+  if (!storage) return errorEnvelope(503, "storage adapter is not available", requestId);
+  try {
+    const items = await searchProjectTopics("", storage, query, tags, limit);
+    return successEnvelope({ items }, requestId);
+  } catch (err) {
+    return errorEnvelope(500, `project search failed: ${err instanceof Error ? err.message : String(err)}`, requestId);
+  }
+}
+
 const routeTable: Record<string, RouteHandler> = {
   // L0–L3 数据面：历史读写接口保留 /v2 与 /v3 双入口；count 仅按 sdk-v3.yaml 暴露 /v3。
   ...Object.fromEntries(
@@ -463,6 +670,14 @@ const routeTable: Record<string, RouteHandler> = {
   [`${V2_PREFIX}/task/delete`]: handleTaskDelete, // @deprecated 改用 /v3/meta/task/delete
   // ── end @deprecated v2 entity 路由 ──
   [`${V2_PREFIX}/pipeline/status`]: handlePipelineStatus,
+  // ── L0.5 summary tips (Code Memory v2) ──
+  [`${V3_PREFIX}/tips/submit`]: handleTipsSubmit,
+  [`${V3_PREFIX}/tips/list`]: handleTipsList,
+  [`${V3_PREFIX}/tips/get`]: handleTipsGet,
+  // ── Code Memory v2 project memory (read-only) ──
+  [`${V3_PREFIX}/project/list`]: handleProjectList,
+  [`${V3_PREFIX}/project/read`]: handleProjectRead,
+  [`${V3_PREFIX}/project/search`]: handleProjectSearch,
 };
 
 export async function handleV2Route(
@@ -647,7 +862,7 @@ export async function handleV2Route(
 async function handleConversationAdd(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
   const parsed = conversationAddRequestSchema.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { session_id, messages } = parsed.data;
+  const { session_id, messages, memory_mode: memoryMode } = parsed.data;
 
   // Enforce three-dim isolation. user_id / agent_id come from request body
   // or x-tdai-* headers (resolved in dispatchV2Request).  When the gateway's
@@ -731,7 +946,7 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
     const rounds = messages.filter((m) => m.role === "user").length;
     if (rounds > 0) {
       try {
-        await deps.notifyPipeline(auth.serviceId, session_id, rounds, iso?.teamId, iso?.agentId);
+        await deps.notifyPipeline(auth.serviceId, session_id, rounds, iso?.teamId, iso?.agentId, memoryMode);
       } catch (err) {
         // Non-fatal: L0 is already persisted, pipeline will catch up later
         deps.logger.warn(`${TAG} Pipeline notify failed for ${session_id}: ${err instanceof Error ? err.message : String(err)}`);

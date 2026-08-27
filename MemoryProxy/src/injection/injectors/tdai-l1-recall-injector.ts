@@ -92,7 +92,7 @@ export class TdaiL1RecallInjector implements InjectionHook {
 
     const lines: string[] = [
       "<tdai_recalled_l1_memories>",
-      "以下是与本轮用户问题相关的 TDAI L1 记忆（自有 + 借入合集，按相关度排序），仅用于辅助回答当前这一轮，不要视为永久系统规则：",
+      "以下是与本轮用户问题相关的 TDAI L1 记忆（自有 + 借入合集，按相关度排序；项目模式类型为 work_fact/work_task/work_method/work_artifact），仅用于辅助回答当前这一轮，不要视为永久系统规则：",
     ];
     for (let i = 0; i < merged.length; i++) {
       const m = merged[i];

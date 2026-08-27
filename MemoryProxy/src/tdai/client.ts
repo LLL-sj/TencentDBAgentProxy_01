@@ -7,6 +7,9 @@ import type {
   TdaiL3Core,
   TdaiMemoryConfig,
   TdaiMessage,
+  TdaiProjectFile,
+  TdaiProjectSearchHit,
+  TdaiProjectTopic,
 } from "./types.js";
 import { log } from "../report/log.js";
 
@@ -111,6 +114,7 @@ export class TdaiClient {
           agent_id: identity.agentId,
           session_id: identity.sessionId,
           task_id: identity.taskId,
+          memory_mode: this.config.memoryMode ?? this.config.promptMode,
           messages: batch,
         },
         identity.sessionId,
@@ -230,6 +234,122 @@ export class TdaiClient {
       content,
       updatedAt: typeof data?.updated_at === "string" ? data.updated_at : undefined,
     };
+  }
+
+  async listProject(identity: TdaiIdentity): Promise<TdaiProjectTopic[]> {
+    return this.listProjectForCtx({
+      teamId: identity.teamId,
+      userId: identity.userId,
+      agentId: identity.agentId,
+    });
+  }
+
+  async readProjectIndex(identity: TdaiIdentity): Promise<string> {
+    return this.readProjectIndexForCtx({
+      teamId: identity.teamId,
+      userId: identity.userId,
+      agentId: identity.agentId,
+    });
+  }
+
+  async readProjectIndexForCtx(ctx: TdaiAgentCtx): Promise<string> {
+    if (!this.isEnabled() || this.config.codeMemoryVersion !== "v2") return "";
+    const data = await this.postForCtx<{ index?: string }>(
+      "/v3/project/list",
+      ctx,
+      { team_id: ctx.teamId, user_id: ctx.userId, agent_id: ctx.agentId },
+      "",
+      undefined,
+      { includeSession: false, includeTask: false },
+    );
+    return typeof data.index === "string" ? data.index : "";
+  }
+
+  async listProjectForCtx(ctx: TdaiAgentCtx): Promise<TdaiProjectTopic[]> {
+    if (!this.isEnabled() || this.config.codeMemoryVersion !== "v2") return [];
+    const data = await this.postForCtx<{ items?: Array<Record<string, unknown>> }>(
+      "/v3/project/list",
+      ctx,
+      { team_id: ctx.teamId, user_id: ctx.userId, agent_id: ctx.agentId },
+      "",
+      undefined,
+      { includeSession: false, includeTask: false },
+    );
+    return (data.items ?? [])
+      .map((item) => ({
+        path: String(item.path ?? ""),
+        name: typeof item.name === "string" ? item.name : undefined,
+        type: typeof item.type === "string" ? item.type : undefined,
+        title: String(item.title ?? ""),
+        tags: Array.isArray(item.tags) ? item.tags.filter((x): x is string => typeof x === "string") : undefined,
+        sources: Array.isArray(item.sources) ? item.sources.filter((x): x is string => typeof x === "string") : undefined,
+        updated: typeof item.updated === "string" ? item.updated : undefined,
+        summary: typeof item.summary === "string" ? item.summary : undefined,
+      }))
+      .filter((item) => item.path && item.title);
+  }
+
+  async readProject(identity: TdaiIdentity, path: string): Promise<TdaiProjectFile | null> {
+    return this.readProjectForCtx(
+      { teamId: identity.teamId, userId: identity.userId, agentId: identity.agentId },
+      path,
+    );
+  }
+
+  async readProjectForCtx(ctx: TdaiAgentCtx, path: string): Promise<TdaiProjectFile | null> {
+    if (!this.isEnabled() || this.config.codeMemoryVersion !== "v2" || !path.trim()) return null;
+    const data = await this.postForCtx<Record<string, unknown> | null>(
+      "/v3/project/read",
+      ctx,
+      { team_id: ctx.teamId, user_id: ctx.userId, agent_id: ctx.agentId, path },
+      "",
+      undefined,
+      { includeSession: false, includeTask: false },
+    );
+    const raw = data ?? {};
+    const content = typeof raw.content === "string" ? raw.content : "";
+    if (!content) return null;
+    return {
+      path: String(raw.path ?? path),
+      title: String(raw.title ?? path),
+      type: typeof raw.type === "string" ? raw.type : undefined,
+      tags: Array.isArray(raw.tags) ? raw.tags.filter((x): x is string => typeof x === "string") : undefined,
+      sources: Array.isArray(raw.sources) ? raw.sources.filter((x): x is string => typeof x === "string") : undefined,
+      updated: typeof raw.updated === "string" ? raw.updated : undefined,
+      content,
+    };
+  }
+
+  async searchProject(identity: TdaiIdentity, query: string, tags?: string[], limit?: number): Promise<TdaiProjectSearchHit[]> {
+    return this.searchProjectForCtx(
+      { teamId: identity.teamId, userId: identity.userId, agentId: identity.agentId },
+      query,
+      tags,
+      limit,
+    );
+  }
+
+  async searchProjectForCtx(ctx: TdaiAgentCtx, query: string, tags?: string[], limit?: number): Promise<TdaiProjectSearchHit[]> {
+    if (!this.isEnabled() || this.config.codeMemoryVersion !== "v2") return [];
+    const data = await this.postForCtx<{ items?: Array<Record<string, unknown>> }>(
+      "/v3/project/search",
+      ctx,
+      { team_id: ctx.teamId, user_id: ctx.userId, agent_id: ctx.agentId, query, tags, limit: limit ?? 10 },
+      "",
+      undefined,
+      { includeSession: false, includeTask: false },
+    );
+    return (data.items ?? [])
+      .map((item) => ({
+        path: String(item.path ?? ""),
+        title: String(item.title ?? ""),
+        type: typeof item.type === "string" ? item.type : undefined,
+        tags: Array.isArray(item.tags) ? item.tags.filter((x): x is string => typeof x === "string") : undefined,
+        summary: typeof item.summary === "string" ? item.summary : undefined,
+        snippet: typeof item.snippet === "string" ? item.snippet : undefined,
+        score: typeof item.score === "number" ? item.score : undefined,
+      }))
+      .filter((item) => item.path);
   }
 
   async readL3(identity: TdaiIdentity): Promise<TdaiL3Core | null> {

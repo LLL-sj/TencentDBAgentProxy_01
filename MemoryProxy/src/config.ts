@@ -8,7 +8,7 @@ const DEFAULT_UPSTREAM = "https://llm-upstream.example.com/v2/chat/completions";
 
 export const DEFAULT_CONFIG: ProxyConfig = {
   server: { host: "0.0.0.0", port: 8096, forwardTimeoutMs: 600_000 },
-  upstream: { url: DEFAULT_UPSTREAM, apiKey: "", agents: {} },
+  upstream: { url: DEFAULT_UPSTREAM, apiKey: "", defaultModel: "", agents: {} },
   log: {
     file: "",
     verbose: false,
@@ -75,7 +75,7 @@ export const DEFAULT_CONFIG: ProxyConfig = {
   creditPricing: { models: [] },
   injection: {
     enabled: false,
-    injectors: ["skill", "knowledge", "tdai-memory"],
+    injectors: ["skill", "knowledge", "tdai-memory", "notes", "summary-tips"],
     assetReflection: { markerOptIn: false },
   },
   // Extraction (write-side) defaults to fully permissive so that a config
@@ -108,6 +108,8 @@ export const DEFAULT_CONFIG: ProxyConfig = {
     memory: {
       enabled: false,
       inject: false,
+      promptMode: "code",
+      codeMemoryVersion: "v1",
       writeL0: false,
       recallL1: false,
       injectL2L3: false,
@@ -132,6 +134,24 @@ export const DEFAULT_CONFIG: ProxyConfig = {
   skillRuntime: {
     allowLlmWrite: false,
   },
+  tips: {
+    enabled: true,
+    reminderEnabled: true,
+    maxReminderPerTask: 2,
+    reminderCooldownSeconds: 1800,
+    firstUserReminder: true,
+    count1Threshold: 3,
+    count2Threshold: 2,
+    timeReminderSeconds: 600,
+    sessionTtlSeconds: 10800,
+  },
+  codexInternal: {
+    promptPrefixes: [
+      "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title",
+      "The following is the Codex agent history whose request action you are assessing",
+      "The following is the Codex agent history added since your last approval assessment",
+    ],
+  },
   auth: {
     enabled: false,
     url: "",
@@ -144,7 +164,17 @@ export const DEFAULT_CONFIG: ProxyConfig = {
 };
 
 /** Load and parse a YAML config file. Returns empty object on missing file. */
-export function loadYamlConfig(filePath: string): RawYamlConfig {
+export function normalizeMemoryPromptMode(value: unknown): "chat" | "code" | "all" | "none" | undefined {
+  if (value === "chat" || value === "code" || value === "all" || value === "none") return value;
+  return undefined;
+}
+
+export function normalizeCodeMemoryVersion(value: unknown): "v1" | "v2" | undefined {
+  if (value === "v1" || value === "v2") return value;
+  return undefined;
+}
+
+function loadYamlConfig(filePath: string): RawYamlConfig {
   try {
     const text = readFileSync(filePath, "utf-8");
     const parsed = yamlLoad(text);
@@ -277,6 +307,10 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
         DEFAULT_CONFIG.upstream.url,
       apiKey: yaml.upstream?.apiKey ?? DEFAULT_CONFIG.upstream.apiKey,
       agents: parseUpstreamAgents(yaml.upstream?.agents),
+      defaultModel:
+        yaml.upstream?.defaultModel ??
+        process.env.PROXY_UPSTREAM_MODEL ??
+        DEFAULT_CONFIG.upstream.defaultModel,
     },
     log: {
       file: overrides.logFile ?? yaml.log?.file ?? DEFAULT_CONFIG.log.file,
@@ -428,6 +462,8 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
       memory: {
         enabled: yaml.tdai?.memory?.enabled ?? DEFAULT_CONFIG.tdai.memory.enabled,
         inject: yaml.tdai?.memory?.inject ?? DEFAULT_CONFIG.tdai.memory.inject,
+        promptMode: normalizeMemoryPromptMode(yaml.tdai?.memory?.promptMode) ?? DEFAULT_CONFIG.tdai.memory.promptMode,
+        codeMemoryVersion: normalizeCodeMemoryVersion(yaml.tdai?.memory?.codeMemoryVersion) ?? DEFAULT_CONFIG.tdai.memory.codeMemoryVersion,
         writeL0: yaml.tdai?.memory?.writeL0 ?? DEFAULT_CONFIG.tdai.memory.writeL0,
         recallL1: yaml.tdai?.memory?.recallL1 ?? DEFAULT_CONFIG.tdai.memory.recallL1,
         injectL2L3: yaml.tdai?.memory?.injectL2L3 ?? DEFAULT_CONFIG.tdai.memory.injectL2L3,
@@ -451,11 +487,30 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
       serviceToken: yaml.knowledge?.serviceToken ?? DEFAULT_CONFIG.knowledge.serviceToken,
       serviceId: yaml.knowledge?.serviceId ?? DEFAULT_CONFIG.knowledge.serviceId,
       timeoutMs: yaml.knowledge?.timeoutMs ?? DEFAULT_CONFIG.knowledge.timeoutMs,
+      allowLlmWrite: yaml.knowledge?.allowLlmWrite ?? false,
     },
     skillRuntime: {
       allowLlmWrite:
         yaml.skillRuntime?.allowLlmWrite ??
         DEFAULT_CONFIG.skillRuntime.allowLlmWrite,
+    },
+    tips: {
+      enabled: yaml.tips?.enabled ?? DEFAULT_CONFIG.tips.enabled,
+      reminderEnabled: yaml.tips?.reminderEnabled ?? DEFAULT_CONFIG.tips.reminderEnabled,
+      maxReminderPerTask: Math.max(0, yaml.tips?.maxReminderPerTask ?? DEFAULT_CONFIG.tips.maxReminderPerTask),
+      reminderCooldownSeconds: Math.max(0, yaml.tips?.reminderCooldownSeconds ?? DEFAULT_CONFIG.tips.reminderCooldownSeconds),
+      firstUserReminder: yaml.tips?.firstUserReminder ?? DEFAULT_CONFIG.tips.firstUserReminder,
+      count1Threshold: Math.max(1, Math.floor(yaml.tips?.count1Threshold ?? DEFAULT_CONFIG.tips.count1Threshold)),
+      count2Threshold: Math.max(1, Math.floor(yaml.tips?.count2Threshold ?? DEFAULT_CONFIG.tips.count2Threshold)),
+      timeReminderSeconds: Math.max(0, Math.floor(yaml.tips?.timeReminderSeconds ?? DEFAULT_CONFIG.tips.timeReminderSeconds)),
+      sessionTtlSeconds: Math.max(0, Math.floor(yaml.tips?.sessionTtlSeconds ?? DEFAULT_CONFIG.tips.sessionTtlSeconds)),
+    },
+    codexInternal: {
+      promptPrefixes: Array.isArray(yaml.codexInternal?.promptPrefixes)
+        ? yaml.codexInternal.promptPrefixes
+            .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+            .map((p) => p.trim())
+        : DEFAULT_CONFIG.codexInternal.promptPrefixes,
     },
     auth: {
       enabled: yaml.auth?.enabled ?? DEFAULT_CONFIG.auth.enabled,

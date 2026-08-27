@@ -23,7 +23,7 @@
  * entry point on every turn, so binding-through-that-path is guaranteed.
  */
 
-import type { SessionInitState, SessionInitStatus, SessionInfo, AgentDetail, TaskDetail } from "./types.js";
+import type { SessionInitState, SessionInitStatus, SessionInfo, SessionMemoryMode, AgentDetail, TaskDetail } from "./types.js";
 import { getSessionRepo, type SessionRepo } from "../db/sessionRepo.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import type { MetadataClient } from "../meta/client.js";
@@ -97,6 +97,18 @@ export class SessionStore {
   /** Test-only helper: expose the identity map for assertions. */
   getBoundIdentity(keyId: string): SessionIdentity | undefined {
     return this.identities.get(keyId);
+  }
+
+  /**
+   * Freeze the memory capture mode on an initialized session.
+   * Returns false when the session is absent or has no sessionInfo.
+   */
+  async freezeMemoryMode(keyId: string, mode: SessionMemoryMode): Promise<boolean> {
+    const state = this.get(keyId);
+    if (!state?.sessionInfo) return false;
+    state.sessionInfo.memory_mode = mode;
+    await this.set(keyId, state);
+    return true;
   }
 
   get(keyId: string): SessionInitState | undefined {

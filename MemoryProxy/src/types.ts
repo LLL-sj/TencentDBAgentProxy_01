@@ -256,6 +256,14 @@ export interface TdaiConfig {
     enabled: boolean;
     /** Master switch for all TDAI memory prompt injection. */
     inject: boolean;
+    /**
+     * Prompt family for memory-related injected instructions.
+     * Mirrors MemoryCore `memory.promptMode`; both sides must be driven by
+     * the same `MEMORY_PROMPT_MODE` env var (default: code).
+     */
+    promptMode: "chat" | "code" | "all" | "none";
+    /** Mirrors MemoryCore memory.codeMemoryVersion. v1=current, v2=project memory index only. */
+    codeMemoryVersion: "v1" | "v2";
     writeL0: boolean;
     recallL1: boolean;
     injectL2L3: boolean;
@@ -302,9 +310,41 @@ export interface KnowledgeConfig {
   serviceToken: string;
   serviceId: string;
   timeoutMs: number;
+  /** Allow the LLM to create/update Team Notes through notes-bridge. */
+  allowLlmWrite?: boolean;
 }
 
 /** Skill runtime-side configuration. */
+export interface TipsConfig {
+  /** Master switch for the summary-tips contract / bridge. */
+  enabled: boolean;
+  /** Dynamic reminder in user.before. */
+  reminderEnabled: boolean;
+  /** Max dynamic reminders per (session, task, stage). */
+  maxReminderPerTask: number;
+  /** Cooldown between reminders in seconds. */
+  reminderCooldownSeconds: number;
+  /** Inject one initial reminder for the first user message of an active stage. */
+  firstUserReminder: boolean;
+  /** Increment threshold for "last assistant block is text" turns. */
+  count1Threshold: number;
+  /** Increment threshold for "final assistant answer" turns. */
+  count2Threshold: number;
+  /** Time-based reminder cadence in seconds. */
+  timeReminderSeconds: number;
+  /** Session/stage TTL in seconds. */
+  sessionTtlSeconds: number;
+}
+
+/** Codex 内部请求识别配置（标题生成 / 安全审批等，不写入 L0）。 */
+export interface CodexInternalConfig {
+  /**
+   * 最后一条 User 消息以这些前缀开头时，视为 Codex 内部 prompt，跳过 L0。
+   * 运营注意：真实用户消息不要使用这些前缀作为对话开头。
+   */
+  promptPrefixes: string[];
+}
+
 export interface SkillRuntimeConfig {
   /**
    * 是否允许主模型创建/修改 skill。默认 false。
@@ -386,6 +426,8 @@ export interface ProxyConfig {
      * Empty / missing entry → agent falls back to `url` + `apiKey`.
      */
     agents: Record<string, AgentUpstreamEntry>;
+    /** 客户端未传 model 时的兜底模型名。env: PROXY_UPSTREAM_MODEL。 */
+    defaultModel: string;
   };
   log: {
     file: string;    // JSONL path; empty string disables file logging
@@ -434,6 +476,10 @@ export interface ProxyConfig {
   coreSkill: CoreSkillConfig;
   knowledge: KnowledgeConfig;
   skillRuntime: SkillRuntimeConfig;
+  /** L0.5 task-summary tips settings (Code Memory v2). */
+  tips: TipsConfig;
+  /** Codex 内部请求过滤（标题生成 / 安全审批 prompt 前缀）。 */
+  codexInternal: CodexInternalConfig;
   auth: AuthConfig;
   /**
    * Internal service accounts allowed to passthrough the proxy without any
@@ -653,6 +699,8 @@ export interface RawYamlConfig {
   upstream?: {
     url?: string;
     apiKey?: string;
+    /** 客户端未传 model 时的兜底模型名。env: PROXY_UPSTREAM_MODEL。 */
+    defaultModel?: string;
     /** Per-agent override map. See `AgentUpstreamEntry`. */
     agents?: Record<string, { url?: string; apiKey?: string } | null | undefined>;
   };
@@ -787,6 +835,20 @@ export interface RawYamlConfig {
   skillRuntime?: {
     allowLlmWrite?: boolean;
   };
+  tips?: {
+    enabled?: boolean;
+    reminderEnabled?: boolean;
+    maxReminderPerTask?: number;
+    reminderCooldownSeconds?: number;
+    firstUserReminder?: boolean;
+    count1Threshold?: number;
+    count2Threshold?: number;
+    timeReminderSeconds?: number;
+    sessionTtlSeconds?: number;
+  };
+  codexInternal?: {
+    promptPrefixes?: string[];
+  };
   auth?: {
     enabled?: boolean;
     url?: string;
@@ -795,6 +857,10 @@ export interface RawYamlConfig {
   systemUsers?: Partial<SystemUserEntry>[];
   admin?: {
     apiKey?: string;
+  };
+  memCommand?: {
+    enabled?: boolean;
+    allowedCommands?: string[];
   };
 }
 

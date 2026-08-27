@@ -95,7 +95,15 @@ export class InjectionPipeline {
         );
       }
 
-      // 2. Parse → AgentContext
+      // 2. Strip original tools from body BEFORE parse so they never enter
+      //    the parse→serialize round-trip. This guarantees bit-for-bit
+      //    preservation. Hook-injected tools (if any) are handled separately.
+      const originalTools = body.tools;
+      if (originalTools !== undefined) {
+        delete body.tools;
+      }
+
+      // 3. Parse → AgentContext (ctx.tools will be undefined since we stripped them)
       const ctx: AgentContext = adapter.parse(body, metadata);
 
       // 2.5 Detect the agent profile.
@@ -127,11 +135,22 @@ export class InjectionPipeline {
         }
       }
 
-      // 3. Execute hooks at each injection point
+      // 4. Execute hooks at each injection point
+      //
+      // ctx.tools is initially undefined (original tools were stripped).
+      // Hooks that inject tools (tools.append / tools.prepend) will populate it.
       const hookResults: HookResult[] = await this.executeHooks(ctx);
 
-      // 4. Serialize → modified body
+      // 5. Serialize → modified body
       const result = adapter.serialize(ctx);
+
+      // 6. Merge tools: original (untouched) + hook-injected (serialized)
+      if (originalTools !== undefined || result.tools) {
+        result.tools = [
+          ...(originalTools as Record<string, unknown>[] ?? []),
+          ...(result.tools as Record<string, unknown>[] ?? []),
+        ];
+      }
 
       // ── Observer: pipeline end ──────────────────────────────────────────
       const durationMs = Date.now() - pipelineStartMs;

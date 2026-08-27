@@ -405,7 +405,7 @@ creditPricing:
 #   tdai-memory — TDAI L2/L3 记忆注入（由 tdai.memory.* 控制，详见 tdai 段）。
 injection:
   enabled: true             # 是否启用上下文注入（关闭后下方 injectors 列表全部失效）
-  injectors: ["skill", "knowledge", "tdai-memory"]   # 要启用的注入器列表
+  injectors: ["skill", "knowledge", "tdai-memory", "notes", "summary-tips"]   # 要启用的注入器列表
   # 对外统一 gateway 地址 —— LLM 生成的 <skill_tools> / <tdai_memory_tools>
   # 段里嵌的 curl URL 都以这个为 base。只填 gateway 域名，**不带端口**
   # （gateway 内部路由到 proxy pod 的端口由 ops 在 gateway 侧配，跟这里无关）。
@@ -506,6 +506,8 @@ tdai:
   memory:
     enabled: true           # Memory 子模块总开关
     inject: true            # 上下文注入总开关（false = 所有 L0~L3 注入全关）
+    promptMode: code        # chat | code；必须与 memory-core 的 memory.promptMode 保持一致（推荐同一个 MEMORY_PROMPT_MODE 生成）
+    codeMemoryVersion: v1   # v1 | v2；v2 只注入 project/MEMORY.md，topic 正文按需读
     writeL0: true           # 是否写入 L0（短期对话记忆）
     recallL1: true          # 是否启用 L1 召回（从对话中检索相关记忆）
     injectL2L3: true        # 是否注入 L2（Agent Profile）+ L3（Team/Global 记忆）到 system prompt
@@ -559,6 +561,30 @@ knowledge:
 #
 # 历史配置项 (已删除): extractToolCallThreshold / maxBucketCount /
 # conversationAddEnabled — 属于 proxy 侧老链路 SkillExtractTrigger, 已下线。
+# L0.5 task-summary tips（Code Memory v2）
+tips:
+  enabled: true                  # 总开关：关闭后 /memory-bridge/v3/tips/submit 返回 403
+  reminderEnabled: true          # 是否启用动态提醒提交总结
+  maxReminderPerTask: 50         # 同一阶段最多提醒次数
+  reminderCooldownSeconds: 600   # 两次提醒的最小间隔（秒）
+  firstUserReminder: true        # 每阶段第一条 user 消息注入一次初始提醒
+  count1Threshold: 2             # “最后一个 assistant block 是 text”累计多少次后提醒
+  count2Threshold: 2             # “无未完成 tool_use 的最终回答”累计多少次后提醒
+  timeReminderSeconds: 480       # 距上次提醒超过该秒数且有新进度时提醒
+  sessionTtlSeconds: 7200        # 阶段不活跃超过该秒数后视为新阶段
+
+# ── Codex 内部请求识别 ─────────────────────────────────────────────────────
+# Codex 会通过同一 /responses 路径发送标题生成、安全审批等内部请求。
+# 这些请求的 User prompt 里带完整 transcript（含工具调用/结果），不能写入 L0。
+# 当最后一条 User 消息以以下任意前缀开头时，proxy 会跳过 L0 写入。
+#
+# 重要：真实用户对话不要使用这些前缀作为开头，否则会被当作 Codex 内部请求过滤。
+codexInternal:
+  promptPrefixes:
+    - "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title"
+    - "The following is the Codex agent history whose request action you are assessing"
+    - "The following is the Codex agent history added since your last approval assessment"
+
 skillRuntime:
   allowLlmWrite: false           # 是否允许主模型创建/修改 skill（默认 false）
                                  #   false: <skill_tools> 只注入只读工具（search/list/view/files_read）

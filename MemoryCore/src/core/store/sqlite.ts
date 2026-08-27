@@ -58,6 +58,7 @@ import type {
 } from "./types.js";
 import { DEFAULT_ISOLATION_ID, rowMatchesIsolation } from "./types.js";
 import { SKILLS_DDL, SKILL_FTS_DDL } from "../skill/skill-store-ddl.js";
+import { ensureSummaryTipsSchema } from "../tips/summary-tips.js";
 import type { Logger } from "../types.js";
 
 export type { L1RecordRow } from "./types.js";
@@ -442,14 +443,23 @@ export class VectorStore implements IMemoryStore {
     // Enable WAL mode for better concurrent read performance
     this.db.exec("PRAGMA journal_mode = WAL");
 
-    // Cap page cache at 64 MB
-    this.db.exec("PRAGMA cache_size = -65536");
+    // Cap page cache at 512 MB (shared connection, high hit rate)
+    this.db.exec("PRAGMA cache_size = -524288");
 
     // Cap memory-mapped I/O at 128 MB to bound RSS growth
     this.db.exec("PRAGMA mmap_size = 134217728");
 
     // Auto-checkpoint WAL every 1000 pages (~4 MB) to keep WAL file compact
-    this.db.exec("PRAGMA wal_autocheckpoint = 1000");
+    this.db.exec("PRAGMA wal_autocheckpoint = 500");
+
+    // Reclaim disk space on DELETE (instead of leaving free pages)
+    this.db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+
+    // WAL mode already guarantees consistency; NORMAL reduces fsync overhead
+    this.db.exec("PRAGMA synchronous = NORMAL");
+
+    // Hard limit ~10 GB (2,621,440 pages × 4 KB). Insert fails when exceeded.
+    this.db.exec("PRAGMA max_page_count = 2621440");
   }
 
   /**
@@ -783,6 +793,10 @@ export class VectorStore implements IMemoryStore {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_agent_session ON l0_conversations(user_id, agent_id, session_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_recorded  ON l0_conversations(user_id, recorded_at)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_agent_recorded ON l0_conversations(agent_id, recorded_at)");
+
+    // L0.5 task-summary tips (Code Memory v2). Add-only table; consumed by
+    // the v2 L1/L2 packager. Same SQLite connection as L0/L1 tables.
+    ensureSummaryTipsSchema(this.db);
 
     // L0 vector virtual table (cosine distance, same dimensions as L1) — deferred when dimensions=0
     if (this.dimensions > 0) {

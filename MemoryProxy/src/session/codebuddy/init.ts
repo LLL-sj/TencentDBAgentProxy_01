@@ -15,6 +15,7 @@ import type {
   SessionInitState,
   SessionRegistrationData,
   TaskDetail,
+  TaskInTeam,
   TeamOption,
 } from "../types.js";
 import { DEFAULT_TASK_LABEL } from "../types.js";
@@ -96,7 +97,7 @@ async function fetchTeamsAndAgents(
         metadataClient.listAgents(t.team_id, userId),
         metadataClient.listTasks(t.team_id),
       ]);
-      const tasks = tasksRaw.map((tk) => ({
+      const tasks: TaskInTeam[] = tasksRaw.map((tk) => ({
         task_id: tk.task_id,
         task_name: tk.title,
       }));
@@ -321,10 +322,15 @@ export async function handleSessionInit(
 
   // ── Safety net: state 丢失但对话已有历史 → 跳过 init（避免会话中途重弹表单）──
   if ((!state || state.status === "uninitialized") && !isFreshCBConversation(messages)) {
-    console.warn(
-      `[session-init:cb] session=${compositeKey} state lost but conversation has history, skipping init`,
+    if (!presetIdentity || !config.headerAutoSelect?.enabled) {
+      console.warn(
+        `[session-init:cb] session=${compositeKey} state lost but conversation has history, skipping init`,
+      );
+      return { intercepted: false };
+    }
+    console.log(
+      `[session-init:cb] session=${compositeKey} state lost but presetIdentity present, falling through to headerAutoSelect`,
     );
-    return { intercepted: false };
   }
 
   // ── Case 1: Uninitialized → 先弹 asset_confirm 对话框 ───────────────────
@@ -390,7 +396,7 @@ export async function handleSessionInit(
 
       if (pr.hadMismatch) {
         if (config.headerAutoSelect.onMismatch === "bypass") {
-          console.warn(`[session-init:cb] session=${compositeKey} preset mismatch → bypass`);
+          console.warn(`[session-init:cb] session=${compositeKey} preset mismatch → bypass (injection enabled)`);
           await store.set(compositeKey, {
             status: "initialized",
             keyId: sessionKey,
@@ -401,9 +407,9 @@ export async function handleSessionInit(
             sessionInfo: null,
             agentDetail: null,
             taskDetail: null,
-            bypassed: true,
+            bypassed: false,
           } as SessionInitState);
-          return { intercepted: false, bypassed: true, justRegistered: true };
+          return { intercepted: false, bypassed: false, justRegistered: true };
         }
         console.warn(`[session-init:cb] session=${compositeKey} preset mismatch → fallback to form`);
         // fall through to the normal asset_confirm flow below

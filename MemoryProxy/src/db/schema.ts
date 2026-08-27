@@ -49,4 +49,15 @@ CREATE TABLE IF NOT EXISTS hook_cache (
   PRIMARY KEY (session_id, hook_id),
   FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS tips_reminder_state (
+  state_key        TEXT PRIMARY KEY,
+  reminder_count   INTEGER NOT NULL DEFAULT 0,
+  count1           INTEGER NOT NULL DEFAULT 0,
+  count2           INTEGER NOT NULL DEFAULT 0,
+  last_reminder_at INTEGER NOT NULL DEFAULT 0,
+  last_active_at   INTEGER NOT NULL DEFAULT 0,
+  stage_started_at INTEGER NOT NULL DEFAULT 0,
+  updated_at       INTEGER NOT NULL DEFAULT 0
+);
 `;

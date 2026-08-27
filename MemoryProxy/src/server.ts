@@ -7,6 +7,8 @@ import { handleAuxiliaryEndpoint } from "./auxiliaryHandler.js";
 import { apiKeyToKeyId, extractBearerToken } from "./opik.js";
 import { createSkillBridgeHandler } from "./skill/skill-bridge.js";
 import { createMemoryBridgeHandler } from "./memory/memory-bridge.js";
+import { createTipsBridgeHandler } from "./tips-bridge.js";
+import { createNotesBridgeHandler } from "./notes-bridge.js";
 import { createInstanceDestroyHandler } from "./routes/instance-destroy.js";
 import { createRateLimitHandlers } from "./routes/rate-limits.js";
 import { hasCostGuardMarker } from "./routes/whitelist.js";
@@ -98,10 +100,19 @@ export function createApp(config: ProxyConfig): Hono {
   const bridgeHandler = createSkillBridgeHandler(config);
   app.post("/skill-bridge/*", (c) => bridgeHandler(c));
 
+  // Summary tips bridge (L0.5 write): registered before the read-only
+  // memory-bridge wildcard so the static path always wins.
+  const tipsBridgeHandler = createTipsBridgeHandler(config);
+  app.post("/memory-bridge/v3/tips/submit", (c) => tipsBridgeHandler(c));
+
   // Memory bridge: 同样模式但反代 tdai L0/L1/L2/L3 只读接口。
   // 让 LLM 用 Bash 调 <proxy>/memory-bridge/v3/atomic/search 等，proxy 注入身份。
   const memoryBridgeHandler = createMemoryBridgeHandler(config);
   app.post("/memory-bridge/*", (c) => memoryBridgeHandler(c));
+
+  // Team Notes bridge: LLM curls read/search team notes, proxy stamps identity.
+  const notesBridgeHandler = createNotesBridgeHandler(config);
+  app.post("/notes-bridge/*", (c) => notesBridgeHandler(c));
 
   // ── Ops endpoint（在 catch-all `POST /*` 之前注册） ───────────────────────
   // /v3/instance/proxy-destroy — shark 销毁实例时清理 proxy 侧 COS 缓存 +

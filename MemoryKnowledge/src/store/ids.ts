@@ -16,6 +16,7 @@ const RANDOM_LEN = 8;
 
 export const WIKI_ID_PREFIX = "wiki-";
 export const CODE_GRAPH_ID_PREFIX = "cg-";
+export const NOTE_ID_PREFIX = "note-";
 
 /** Generate 8-char unbiased random base36 string. */
 function randomSuffix(len = RANDOM_LEN): string {
@@ -34,10 +35,22 @@ export function genCodeGraphId(): string {
   return CODE_GRAPH_ID_PREFIX + randomSuffix();
 }
 
+export function genNoteId(): string {
+  return NOTE_ID_PREFIX + randomSuffix();
+}
+
+export function genRevisionId(): string {
+  return "nrev-" + randomSuffix(12);
+}
+
 export function isWikiId(id: string): boolean {
   return new RegExp(`^${WIKI_ID_PREFIX}[0-9a-z]{${RANDOM_LEN}}$`).test(id);
 }
 
 export function isCodeGraphId(id: string): boolean {
   return new RegExp(`^${CODE_GRAPH_ID_PREFIX}[0-9a-z]{${RANDOM_LEN}}$`).test(id);
+}
+
+export function isNoteId(id: string): boolean {
+  return new RegExp(`^${NOTE_ID_PREFIX}[0-9a-z]{${RANDOM_LEN}}$`).test(id);
 }

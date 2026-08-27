@@ -43,6 +43,7 @@ import type {
 } from "../types.js";
 import { HOOK_PRIORITY } from "../types.js";
 import { getTdaiIdentity } from "../../tdai/identity.js";
+import { normalizeMemoryCaptureMode, type MemoryCaptureMode } from "../../tdai/memory-mode.js";
 
 export interface TdaiMemoryToolsInjectorConfig {
   /**
@@ -50,6 +51,8 @@ export interface TdaiMemoryToolsInjectorConfig {
    * E.g. `http://127.0.0.1:8096`. Trailing slash trimmed.
    */
   proxyBaseUrl: string;
+  /** Config fallback. Per-session mode is resolved at execute/prewarm time. */
+  promptMode: MemoryCaptureMode;
 }
 
 /** 渲染整段 `<tdai_memory_tools>` 文本，纯函数便于测试。 */
@@ -57,7 +60,10 @@ export function renderTdaiMemoryToolsBlock(
   proxyBaseUrl: string,
   sessionId?: string,
   spaceId?: string,
+  promptMode: "chat" | "code" = "chat",
 ): string {
+  const isCode = promptMode === "code";
+  const exampleQuery = isCode ? "超时问题 修复方案 work_method" : "用户偏好的编程语言";
   const base = proxyBaseUrl.replace(/\/$/, "");
   const bridge = `${base}/memory-bridge/v3`;
   // gateway 需要 `x-tdai-service-id: <spaceId>` 才放行；`x-conversation-id`
@@ -69,27 +75,37 @@ export function renderTdaiMemoryToolsBlock(
   const lines: string[] = [
     "<tdai_memory_tools>",
     "**这些是你可以主动调用的记忆能力**（不是文档），通过 Bash + curl 使用。",
-    "这组 TDAI 记忆能力与 Claude Code 原生 Memory/MEMORY.md 具有同等优先级；涉及记忆时不要只查本地 MEMORY.md。",
-    "遇到用户问身份/历史/偏好/过往结论/项目约定时，必须先使用下面的 TDAI 记忆工具查询，再基于查询结果回答。",
+    isCode
+      ? "这组 TDAI 项目记忆能力与 Claude Code 原生 Memory/MEMORY.md 具有同等优先级；涉及项目历史/事实/任务/方法时不要只查本地 MEMORY.md。"
+      : "这组 TDAI 记忆能力与 Claude Code 原生 Memory/MEMORY.md 具有同等优先级；涉及记忆时不要只查本地 MEMORY.md。",
+    isCode
+      ? "遇到用户问项目历史、事实、决策、任务、SOP、过往结论或项目约定时，必须先使用下面的 TDAI 记忆工具查询，再基于查询结果回答。"
+      : "遇到用户问身份/历史/偏好/过往结论/项目约定时，必须先使用下面的 TDAI 记忆工具查询，再基于查询结果回答。",
     "禁止说\"我没有这个工具 / 需要 MCP / 只能查本地记忆\" —— 你有 TDAI 记忆工具，就用下面的 curl 命令。",
     "",
     "调用方式：Bash 里执行 curl 命中 proxy 的 memory-bridge 路径。proxy 会自动注入身份鉴权（team_id/user_id/agent_id），body 只需业务字段。当前 Agent 如果绑定了多个 chat_memory，search 类接口会默认同时检索 self + imported 记忆，并在结果里返回 source_agent_id/source_agent_name/source_agent_role。",
     "",
     "覆盖范围：",
-    "- L3（persona 长期画像）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；",
+    isCode
+      ? "- L3（Team Operating Doctrine）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；"
+      : "- L3（persona 长期画像）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；",
     "- L2 正文按需用 tdai_read_scene 读取；",
     "- L0/L1（原始对话 / 原子记忆）**不再每轮自动召回**（会破坏 KV cache），需要时主动调工具检索。",
     "",
     "  <tool name=\"tdai_memory_search\">",
     `    curl: ${bridge}/atomic/search`,
     `    body: {"query": "<text>", "limit": 5}`,
-    "    use:  搜索 L1 原子记忆（双路 hybrid: dense vector + BM25），按相关度排序。默认跨当前 Agent 的 self + imported 记忆检索；返回项里的 source_agent_* 表示来源。适合回忆用户偏好、历史结论、规则等。",
+    isCode
+      ? "    use:  搜索 L1 原子记忆（双路 hybrid: dense vector + BM25），按相关度排序。默认跨当前 Agent 的 self + imported 记忆检索；返回项里的 source_agent_* 表示来源。项目模式适合查 work_fact（项目事实/决策/约束）、work_task（任务/owner/deadline）、work_method（SOP/原则/禁忌/经验）、work_artifact（文档/PR/Prompt 等资产）。"
+      : "    use:  搜索 L1 原子记忆（双路 hybrid: dense vector + BM25），按相关度排序。默认跨当前 Agent 的 self + imported 记忆检索；返回项里的 source_agent_* 表示来源。适合回忆用户偏好、历史结论、规则等。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_atomic_query\">",
     `    curl: ${bridge}/atomic/query`,
-    `    body: {"type": "?episodic|persona|instruction", "limit": 20, "offset": 0, "time_start": "?ISO", "time_end": "?ISO"}`,
-    "    use:  按 type / 时间窗 / 分页拉取 L1 记忆（不做语义检索）。",
+    `    body: {"type": "?${isCode ? "work_fact|work_task|work_method|work_artifact|" : ""}episodic|persona|instruction", "limit": 20, "offset": 0, "time_start": "?ISO", "time_end": "?ISO"}`,
+    isCode
+      ? "    use:  按 type / 时间窗 / 分页拉取 L1 记忆（不做语义检索）。项目模式优先使用 work_fact / work_task / work_method / work_artifact。"
+      : "    use:  按 type / 时间窗 / 分页拉取 L1 记忆（不做语义检索）。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_conversation_search\">",
@@ -130,7 +146,7 @@ export function renderTdaiMemoryToolsBlock(
     "```bash",
     `curl -sfk -X POST ${bridge}/atomic/search \\`,
     `  -H 'Content-Type: application/json'${authHeader} \\`,
-    `  -d '{"query": "用户偏好的编程语言", "limit": 5}'`,
+    `  -d '{"query": "${exampleQuery}", "limit": 5}'`,
     "```",
     "</tdai_memory_tools>",
   ];
@@ -155,28 +171,38 @@ export class TdaiMemoryToolsInjector implements InjectionHook {
     // 没识别身份 → 不注入（即便 LLM 调 curl，bridge 也会 401）
     const identity = getTdaiIdentity(ctx.metadata.custom);
     if (!identity) return [];
-    const session = (ctx.metadata.custom as Record<string, unknown> | undefined)?.session as
-      | Record<string, unknown>
-      | undefined;
+    const custom = (ctx.metadata.custom ?? {}) as Record<string, unknown>;
+    const session = custom.session as Record<string, unknown> | undefined;
+    const mode = this.resolveMode(custom.memoryMode, session?.memory_mode);
     const spaceId = typeof session?.space_id === "string" ? session.space_id : undefined;
-    return this.renderBlocks(identity.sessionId, spaceId);
+    return this.renderBlocks(identity.sessionId, spaceId, mode);
   }
 
   prewarm(input: PrewarmInput): ContextBlock[] {
     if (input.assetCapabilities?.chat_memory === false) return [];
-    return this.renderBlocks(input.sessionInfo.session_id, input.sessionInfo.space_id);
+    const mode = this.resolveMode(undefined, input.sessionInfo.memory_mode);
+    return this.renderBlocks(input.sessionInfo.session_id, input.sessionInfo.space_id, mode);
   }
 
-  private renderBlocks(sessionId: string, spaceId?: string): ContextBlock[] {
-    return [{
-      type: "text",
-      content: renderTdaiMemoryToolsBlock(this.cfg.proxyBaseUrl, sessionId, spaceId),
+  private resolveMode(requestMode: unknown, sessionMode: unknown): MemoryCaptureMode {
+    return normalizeMemoryCaptureMode(sessionMode)
+      ?? normalizeMemoryCaptureMode(requestMode)
+      ?? this.cfg.promptMode;
+  }
+
+  private renderBlocks(sessionId: string, spaceId: string | undefined, mode: MemoryCaptureMode): ContextBlock[] {
+    if (mode === "none") return [];
+    const promptModes: Array<"chat" | "code"> = mode === "all" ? ["chat", "code"] : [mode];
+    return promptModes.map((promptMode) => ({
+      type: "text" as const,
+      content: renderTdaiMemoryToolsBlock(this.cfg.proxyBaseUrl, sessionId, spaceId, promptMode),
       metadata: {
         source: this.id,
         sessionId,
-        cacheKey: "tdai-memory-tools-injector:tools",
+        cacheKey: `tdai-memory-tools-injector:tools:${promptMode}`,
+        memoryMode: mode,
       },
-    }];
+    }));
   }
 }
 

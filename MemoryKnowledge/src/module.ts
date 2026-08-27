@@ -25,6 +25,7 @@ import { SourceFetcherRegistry } from "./source-fetcher/index.js";
 import { createLogger } from "./logger.js";
 import type { LlmConfig } from "./config.js";
 import { AutoSyncScheduler, resolveAutoSyncConfig, type AutoSyncConfig } from "./store/auto-sync-scheduler.js";
+import { TeamNotesService } from "./store/team-notes-service.js";
 
 const log = createLogger("knowledge-module");
 
@@ -62,6 +63,8 @@ export interface KnowledgeModule {
   autoSyncScheduler: AutoSyncScheduler;
   /** 定时自动同步的解析后配置（挂载 admin 路由时透出）。 */
   autoSyncConfig: AutoSyncConfig;
+  /** Team-shared lightweight markdown notes. */
+  notesService: TeamNotesService;
 }
 
 /**
@@ -75,6 +78,9 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
 
   // Store
   const store = new SqliteKnowledgeStore(db);
+
+  // Team Notes — no LLM, no file dual-write. SQLite is the system of record.
+  const notesService = new TeamNotesService(db);
 
   // Per-instance LLM routing binding + resolver (proxy/byo → effective LlmConfig).
   // No binding → global LLM_MODE decides: 'custom' uses global LLM_* direct,
@@ -278,5 +284,5 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
   });
   autoSyncScheduler.start();
 
-  return { wikiService, cgService, wikiMgr, store, instancePool, llmBindingStore, autoSyncScheduler, autoSyncConfig };
+  return { wikiService, cgService, wikiMgr, store, instancePool, llmBindingStore, autoSyncScheduler, autoSyncConfig, notesService };
 }

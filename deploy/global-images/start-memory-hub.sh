@@ -66,6 +66,12 @@ if [[ -z "${MEMORY_HUB_PROXY_PUBLIC_URL+x}" ]]; then
   info "  (如需覆盖，在 .env 里显式设 MEMORY_HUB_PROXY_PUBLIC_URL=http://<your-ip>:${PROXY_PORT:-8096})"
 fi
 
+RESTART_POLICY="${TDAI_RESTART_POLICY:-no}"
+TZ_ARGS=()
+if [[ -n "${TDAI_TZ:-}" ]]; then
+  TZ_ARGS=(-e "TZ=$TDAI_TZ")
+fi
+
 CONTAINER=tdai-memory-hub
 NETWORK=tdai-memory-stack
 
@@ -90,8 +96,10 @@ $DOCKER run -d --name "$CONTAINER" \
   --network "$NETWORK" \
   --network-alias memory-hub \
   --add-host=host.docker.internal:host-gateway \
+  --restart "$RESTART_POLICY" \
   -p "${PANEL_PORT}:8125" \
   -p "${KNOWLEDGE_PORT}:8424" \
+  "${TZ_ARGS[@]}" \
   -v "${PANEL_VOLUME}:/data/knowledge" \
   -e PANEL_PORT=8125 \
   -e KNOWLEDGE_PORT=8424 \

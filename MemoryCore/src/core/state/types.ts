@@ -1,3 +1,5 @@
+import type { MemoryCaptureMode } from "../memory-mode.js";
+
 /**
  * IStateBackend — Pipeline 状态后端抽象层
  *
@@ -23,6 +25,8 @@
 /** 复用现有 checkpoint.ts 中的 PipelineSessionState 字段 */
 export interface PipelineSessionState {
   conversation_count: number;
+  /** Frozen per-session capture mode. Undefined means use the config fallback. */
+  memory_mode?: MemoryCaptureMode;
   last_extraction_time: string;
   last_extraction_updated_time: string;
   last_active_time: number;
@@ -33,6 +37,7 @@ export interface PipelineSessionState {
 
 export const DEFAULT_PIPELINE_STATE: PipelineSessionState = {
   conversation_count: 0,
+  memory_mode: undefined,
   last_extraction_time: "",
   last_extraction_updated_time: "",
   last_active_time: 0,
@@ -77,6 +82,8 @@ export interface TaskPayload {
 
 export interface CaptureAtomicParams {
   instanceId: string;
+  /** Frozen per-session memory mode; persisted on the session state. */
+  memoryMode?: MemoryCaptureMode;
   sessionId: string;
   /** 同 TaskPayload.teamId / agentId — 决定 buffer + state 的 hash slot 归属。 */
   teamId?: string;

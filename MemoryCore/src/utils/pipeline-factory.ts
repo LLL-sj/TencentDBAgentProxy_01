@@ -13,7 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { MemoryTdaiConfig } from "../config.js";
+import type { MemoryTdaiConfig, MemoryPromptMode } from "../config.js";
 import { MemoryPipelineManager } from "./pipeline-manager.js";
 import type { L2Runner, L3Runner } from "./pipeline-manager.js";
 import { SessionFilter } from "./session-filter.js";
@@ -21,6 +21,8 @@ import { extractL1Memories } from "../core/record/l1-extractor.js";
 import { readConversationMessagesGroupedBySessionId } from "../core/conversation/l0-recorder.js";
 import type { ConversationMessage } from "../core/conversation/l0-recorder.js";
 import { CheckpointManager } from "./checkpoint.js";
+import { expandMemoryCaptureModes, normalizeMemoryCaptureMode } from "../core/memory-mode.js";
+import { runProjectMemoryPackager, type RunProjectMemoryPackagerResult } from "./project-memory-packager.js";
 import type { PipelineSessionState } from "./checkpoint.js";
 import { createStoreBundle } from "../core/store/factory.js";
 import type { IMemoryStore } from "../core/store/types.js";
@@ -101,7 +103,7 @@ function scopedStorage(storage: StorageAdapter | undefined, ctx?: ProfileIsolati
   return storage ? createScopedStorageAdapter(storage, profileStoragePrefixForScope(buildIsolationScope(ctx))) : undefined;
 }
 
-function scopedStorageForScope(storage: StorageAdapter | undefined, scope: string): StorageAdapter | undefined {
+export function scopedStorageForScope(storage: StorageAdapter | undefined, scope: string): StorageAdapter | undefined {
   if (!storage || scope === DEFAULT_PROFILE_SCOPE) return storage;
   return createScopedStorageAdapter(storage, profileStoragePrefixForScope(scope));
 }
@@ -110,7 +112,7 @@ function scopedDataDir(dataDir: string, ctx?: ProfileIsolation): string {
   return scopedDataDirForScope(dataDir, buildIsolationScope(ctx));
 }
 
-function scopedDataDirForScope(dataDir: string, scope: string): string {
+export function scopedDataDirForScope(dataDir: string, scope: string): string {
   return scope === DEFAULT_PROFILE_SCOPE ? dataDir : path.join(dataDir, "profiles", encodeURIComponent(scope));
 }
 
@@ -171,6 +173,10 @@ export interface PipelineFactoryOptions {
   l1LlmRunner?: import("../core/types.js").LLMRunner;
   /** Host-neutral LLM runner for L2/L3 (tool-call enabled, enableTools=true). */
   l2l3LlmRunner?: import("../core/types.js").LLMRunner;
+  /** Tool-enabled LLM runner for Code Memory v2 project packager. */
+  projectMemoryLLMRunner?: import("../core/types.js").LLMRunner;
+  /** Per-session capture mode override (chat | code | all | none). */
+  memoryMode?: string;
 }
 
 // ============================
@@ -349,6 +355,34 @@ async function _doInitStores(
 // ============================
 
 /**
+ * Run the Code Memory v2 project packager for one team+agent scope.
+ * Keeps scope-path/scope-storage computation in one place for both the L1
+ * fast path and the service-mode L2 executor.
+ */
+export async function runProjectMemoryPackagerForScope(params: {
+  pluginDataDir: string;
+  cfg: MemoryTdaiConfig;
+  store?: IMemoryStore;
+  storage?: StorageAdapter;
+  llmRunner?: import("../core/types.js").LLMRunner;
+  teamId: string;
+  agentId: string;
+  logger?: Logger;
+}): Promise<RunProjectMemoryPackagerResult> {
+  const scope = buildIsolationScope({ teamId: params.teamId, agentId: params.agentId });
+  return runProjectMemoryPackager({
+    dataDir: scopedDataDirForScope(params.pluginDataDir, scope),
+    storage: scopedStorageForScope(params.storage, scope),
+    cfg: params.cfg.projectMemory,
+    store: params.store,
+    llmRunner: params.llmRunner,
+    teamId: params.teamId,
+    agentId: params.agentId,
+    logger: params.logger,
+  });
+}
+
+/**
  * Create the standard L1 runner function.
  *
  * Reads L0 messages (from VectorStore DB or JSONL fallback), groups by sessionId,
@@ -370,6 +404,10 @@ export function createL1Runner(opts: {
   getInstanceId?: () => string | undefined;
   /** Host-neutral LLM runner for L1 extraction (standalone/gateway mode). */
   llmRunner?: import("../core/types.js").LLMRunner;
+  /** Tool-enabled LLM runner for Code Memory v2 project packager. */
+  projectMemoryLLMRunner?: import("../core/types.js").LLMRunner;
+  /** Per-session capture mode override (chat | code | all | none). */
+  memoryMode?: string;
   /** StorageAdapter for file operations (COS/local). */
   storage?: StorageAdapter;
 }): (params: { sessionKey: string }) => Promise<{
@@ -381,7 +419,8 @@ export function createL1Runner(opts: {
   hasFullBacklog: boolean;
   profileScopes: string[];
 }> {
-  const { pluginDataDir, cfg, openclawConfig, vectorStore, embeddingService, logger, getInstanceId, llmRunner, storage } = opts;
+  const { pluginDataDir, cfg, openclawConfig, vectorStore, embeddingService, logger, getInstanceId, llmRunner, projectMemoryLLMRunner, storage } = opts;
+  const captureMode = normalizeMemoryCaptureMode(opts.memoryMode ?? cfg.extraction.promptMode);
   const config = openclawConfig as Record<string, unknown> | undefined;
 
   return async ({ sessionKey }) => {
@@ -550,11 +589,17 @@ export function createL1Runner(opts: {
       const hasMore = hasUnprocessedInBatch && !hasFullBacklog;
 
       const totalMessages = processed.length;
+      const promptModes = expandMemoryCaptureModes(captureMode, cfg.codeMemoryVersion);
       logger.info(
         `${TAG} [l1] Processing ${totalMessages} L0 messages across ${groups.length} sessionId group(s) ` +
-        `for session ${sessionKey} (queried=${queriedCount}, sliceEnd=${sliceEnd}, ` +
+        `for session ${sessionKey} (mode=${captureMode}, promptModes=${promptModes.join("+")}, queried=${queriedCount}, sliceEnd=${sliceEnd}, ` +
         `hasMore=${hasMore}, hasFullBacklog=${hasFullBacklog})`,
       );
+
+      if (promptModes.length === 0) {
+        await checkpoint.markL1ExtractionComplete(sessionKey, 0, maxRecordedAtMs || undefined, undefined);
+        return { processedCount: totalMessages, storedCount: 0, hasMore, hasFullBacklog, profileScopes: [] };
+      }
 
       let totalExtracted = 0;
       let totalStored = 0;
@@ -563,52 +608,61 @@ export function createL1Runner(opts: {
 
       for (const group of groups) {
         logger.debug?.(
-          `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
+          `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages, promptModes=${promptModes.join("+")}`,
         );
 
-        const l1Result = await extractL1Memories({
-          messages: group.messages,
-          sessionKey,
-          sessionId: group.sessionId,
-          taskId: group.taskId,
-          teamId: group.teamId,
-          userId: group.userId,
-          agentId: group.agentId,
-          baseDir: pluginDataDir,
-          config,
-          options: {
-            enableDedup: cfg.extraction.enableDedup,
-            maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
-            model: cfg.extraction.model,
-            promptMode: cfg.extraction.promptMode,
-            previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
-            vectorStore,
-            embeddingService,
-            conflictRecallTopK: cfg.embedding.conflictRecallTopK,
-            embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
-            llmRunner,
-          },
-          logger,
-          instanceId: getInstanceId?.(),
-          storage,
-        });
-
-        totalExtracted += l1Result.extractedCount;
-        totalStored += l1Result.storedCount;
-        if (l1Result.storedCount > 0) {
-          // L2/L3 output is team+agent scoped, but each L2 extraction input must
-          // stay bounded to the source session that just produced L1. Encode the
-          // source session in the L2 task key; buildIsolationScope() will ignore
-          // it later when choosing the profile output directory.
-          profileScopes.add(buildProfileL2Key({
+        for (const promptMode of promptModes) {
+          const l1Result = await extractL1Memories({
+            messages: group.messages,
+            sessionKey,
+            sessionId: group.sessionId,
+            taskId: group.taskId,
             teamId: group.teamId,
             userId: group.userId,
             agentId: group.agentId,
-            sessionId: group.sessionId,
-          }));
-        }
-        if (l1Result.lastSceneName) {
-          lastSceneName = l1Result.lastSceneName;
+            baseDir: pluginDataDir,
+            config,
+            options: {
+              enableDedup: cfg.extraction.enableDedup,
+              // The runner may extend past L1_BATCH_PROCESS to avoid splitting
+              // same-millisecond siblings. Make the extractor treat every row
+              // in this group as a "new" message so boundary extension never
+              // silently downgrades rows to background-only and loses them.
+              maxMessagesPerExtraction: Math.max(10, group.messages.length),
+              maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
+              model: cfg.extraction.model,
+              promptMode,
+              codeMemoryVersion: cfg.codeMemoryVersion,
+              l1V2ShortTexts: cfg.l1V2,
+              previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
+              vectorStore,
+              embeddingService,
+              conflictRecallTopK: cfg.embedding.conflictRecallTopK,
+              embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
+              llmRunner,
+            },
+            logger,
+            instanceId: getInstanceId?.(),
+            storage,
+          });
+
+          totalExtracted += l1Result.extractedCount;
+          totalStored += l1Result.storedCount;
+          if (l1Result.storedCount > 0) {
+            // L2/L3 output is team+agent scoped, but each L2 extraction input must
+            // stay bounded to the source session that just produced L1. Encode the
+            // source session in the L2 task key; buildIsolationScope() will ignore
+            // it later when choosing the profile output directory.
+            profileScopes.add(buildProfileL2Key({
+              teamId: group.teamId,
+              userId: group.userId,
+              agentId: group.agentId,
+              sessionId: group.sessionId,
+            }));
+          }
+          if (l1Result.lastSceneName) {
+            lastSceneName = l1Result.lastSceneName;
+          }
         }
       }
 
@@ -619,6 +673,12 @@ export function createL1Runner(opts: {
       logger.info(
         `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s))`,
       );
+
+      // Code Memory v2 L2.5 (project packager) is no longer invoked inline here.
+      // It is driven exclusively by the configured L2 scheduling path:
+      //   L1 complete -> L2 timer (l2DelayAfterL1Seconds)
+      //   L2 complete -> max-interval fallback timer (l2MaxIntervalSeconds)
+      // and guarded by projectMemory.packagerMinIntervalSeconds + the L1 cursor.
 
       return { processedCount: totalMessages, storedCount: totalStored, hasMore, hasFullBacklog, profileScopes: Array.from(profileScopes) };
     } catch (err) {
@@ -669,10 +729,13 @@ export function createL2Runner(opts: {
   instanceId?: string;
   /** Host-neutral LLM runner for L2 scene extraction (standalone/gateway mode). Must have enableTools=true. */
   llmRunner?: import("../core/types.js").LLMRunner;
+  /** Per-session prompt mode override for scene extraction. */
+  promptMode?: MemoryPromptMode;
   /** StorageAdapter for file operations (COS/local). */
   storage?: StorageAdapter;
 }): L2Runner {
   const { pluginDataDir, cfg, openclawConfig, vectorStore, logger, instanceId, llmRunner, storage } = opts;
+  const l2PromptMode = opts.promptMode ?? cfg.persona.promptMode;
   let profileBaseline = new Map<string, { version: number; contentMd5: string; createdAtMs: number }>();
 
   return async (sessionKey: string, cursor?: string) => {
@@ -756,7 +819,7 @@ export function createL2Runner(opts: {
         dataDir: groupDataDir,
         config: openclawConfig!,
         model: cfg.persona.model,
-        promptMode: cfg.persona.promptMode,
+        promptMode: l2PromptMode,
         maxScenes: cfg.persona.maxScenes,
         sceneBackupCount: cfg.persona.sceneBackupCount,
         logger,
@@ -837,10 +900,13 @@ export function createL3Runner(opts: {
   instanceId?: string;
   /** Host-neutral LLM runner for L3 persona generation (standalone/gateway mode). Must have enableTools=true. */
   llmRunner?: import("../core/types.js").LLMRunner;
+  /** Per-session prompt mode override for persona generation. */
+  promptMode?: MemoryPromptMode;
   /** StorageAdapter for file operations (COS/local). */
   storage?: StorageAdapter;
 }): L3Runner {
   const { pluginDataDir, cfg, openclawConfig, vectorStore, logger, instanceId, llmRunner, storage } = opts;
+  const l3PromptMode = opts.promptMode ?? cfg.persona.promptMode;
 
   return async () => {
     const scopes = await discoverProfileScopes(pluginDataDir, storage, logger);
@@ -971,7 +1037,7 @@ export function createPipelineManager(
  * and `createL3Runner()` from this module.
  */
 export async function createPipeline(opts: PipelineFactoryOptions): Promise<PipelineInstance> {
-  const { pluginDataDir, cfg, openclawConfig, logger, sessionFilter, l1LlmRunner } = opts;
+  const { pluginDataDir, cfg, openclawConfig, logger, sessionFilter, l1LlmRunner, l2l3LlmRunner, projectMemoryLLMRunner } = opts;
 
   // Ensure data directories exist
   initDataDirectories(pluginDataDir);
@@ -992,6 +1058,7 @@ export async function createPipeline(opts: PipelineFactoryOptions): Promise<Pipe
     embeddingService,
     logger,
     llmRunner: l1LlmRunner,
+    projectMemoryLLMRunner: projectMemoryLLMRunner ?? l2l3LlmRunner,
   }));
 
   // Wire persister
@@ -1056,5 +1123,6 @@ export function createStatefulPipelineManager(
     instanceId,
     logger,
     sessionFilter ?? new SessionFilter([]),
+    cfg.extraction.promptMode,
   );
 }

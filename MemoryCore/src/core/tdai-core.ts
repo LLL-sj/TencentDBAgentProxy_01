@@ -47,6 +47,7 @@ import {
   createPersister,
   createL2Runner,
   createL3Runner,
+  runProjectMemoryPackagerForScope,
 } from "../utils/pipeline-factory.js";
 import { MemoryPipelineManager } from "../utils/pipeline-manager.js";
 import { CheckpointManager } from "../utils/checkpoint.js";
@@ -734,6 +735,7 @@ export class TdaiCore {
       logger: this.logger,
       getInstanceId: () => this.instanceId,
       llmRunner: l1LlmRunner,
+      projectMemoryLLMRunner: l2l3LlmRunner,
       storage: this.storage,
     }));
 
@@ -1038,6 +1040,7 @@ export class TdaiCore {
     store: IMemoryStore,
     embedding: EmbeddingService,
     storage?: StorageAdapter,
+    memoryMode?: string,
   ): Promise<{ storedCount: number; creditUsed: number; hasMore: boolean; hasFullBacklog: boolean; profileScopes: string[] }> {
     const useStandaloneRunner = this.cfg.llm.enabled || this.hostAdapter.hostType !== "openclaw";
     const openclawConfig = (!useStandaloneRunner && this.hostAdapter.hostType === "openclaw")
@@ -1061,6 +1064,9 @@ export class TdaiCore {
     const llmRunner = useStandaloneRunner
       ? trackingFactory.createRunner({ enableTools: false })
       : undefined;
+    const projectMemoryLLMRunner = useStandaloneRunner
+      ? trackingFactory.createRunner({ enableTools: true })
+      : undefined;
 
     const runner = createL1Runner({
       pluginDataDir: this.dataDir,
@@ -1071,6 +1077,8 @@ export class TdaiCore {
       logger: this.logger,
       getInstanceId: () => this.instanceId,
       llmRunner,
+      projectMemoryLLMRunner,
+      memoryMode,
       storage: storage ?? this.getStorage(),
     });
     const result = await runner({ sessionKey, msg: [], bg_msg: [] });
@@ -1087,7 +1095,7 @@ export class TdaiCore {
   /**
    * Run L2 scene extraction using an externally provided Store.
    */
-  async runL2WithStore(sessionKey: string, store: IMemoryStore, storage?: StorageAdapter, cursor?: string): Promise<{ creditUsed: number; skipped: boolean }> {
+  async runL2WithStore(sessionKey: string, store: IMemoryStore, storage?: StorageAdapter, cursor?: string, memoryMode?: string): Promise<{ creditUsed: number; skipped: boolean }> {
     const useStandaloneRunner = this.cfg.llm.enabled || this.hostAdapter.hostType !== "openclaw";
     const openclawConfig = (!useStandaloneRunner && this.hostAdapter.hostType === "openclaw")
       ? (this.hostAdapter as { getOpenClawConfig?(): unknown }).getOpenClawConfig?.()
@@ -1119,6 +1127,7 @@ export class TdaiCore {
       logger: this.logger,
       instanceId: this.instanceId,
       llmRunner,
+      promptMode: memoryMode === "code" ? "code" : "chat",
       storage: storage ?? this.getStorage(),
     });
     const runnerResult = await runner(sessionKey, cursor);
@@ -1129,9 +1138,49 @@ export class TdaiCore {
   }
 
   /**
+   * Run the Code Memory v2 project packager using an externally provided Store.
+   * Used by service-mode L2 tasks so code+v2 never fakes a skip.
+   */
+  async runProjectMemoryPackagerWithStore(
+    store: IMemoryStore,
+    teamId: string,
+    agentId: string,
+    storage?: StorageAdapter,
+  ): Promise<{ creditUsed: number; skipped: boolean; reason: string }> {
+    if (!teamId || !agentId) return { creditUsed: 0, skipped: true, reason: "missing team/agent" };
+
+    const useStandaloneRunner = this.cfg.llm.enabled || this.hostAdapter.hostType !== "openclaw";
+    let runnerFactory = this.runnerFactory;
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
+      const runtimeLlm = this.resolveRuntimeLlm();
+      runnerFactory = new StandaloneLLMRunnerFactory({
+        config: runtimeLlm,
+        logger: this.logger,
+      });
+    }
+    const trackingFactory = new MetricTrackingRunnerFactory(runnerFactory, () => this.instanceId);
+    const llmRunner = useStandaloneRunner
+      ? trackingFactory.createRunner({ enableTools: true })
+      : undefined;
+
+    const result = await runProjectMemoryPackagerForScope({
+      pluginDataDir: this.dataDir,
+      cfg: this.cfg,
+      store,
+      storage: storage ?? this.getStorage(),
+      llmRunner,
+      teamId,
+      agentId,
+      logger: this.logger,
+    });
+    const creditUsed: number = (llmRunner as any)?.accumulatedCredit ?? 0;
+    return { creditUsed, skipped: !result.ran, reason: result.reason };
+  }
+
+  /**
    * Run L3 persona generation using an externally provided Store.
    */
-  async runL3WithStore(store: IMemoryStore, storage?: StorageAdapter): Promise<{ creditUsed: number }> {
+  async runL3WithStore(store: IMemoryStore, storage?: StorageAdapter, memoryMode?: string): Promise<{ creditUsed: number }> {
     const useStandaloneRunner = this.cfg.llm.enabled || this.hostAdapter.hostType !== "openclaw";
     const openclawConfig = (!useStandaloneRunner && this.hostAdapter.hostType === "openclaw")
       ? (this.hostAdapter as { getOpenClawConfig?(): unknown }).getOpenClawConfig?.()
@@ -1163,6 +1212,7 @@ export class TdaiCore {
       logger: this.logger,
       instanceId: this.instanceId,
       llmRunner,
+      promptMode: memoryMode === "code" ? "code" : "chat",
       storage: storage ?? this.getStorage(),
     });
     await runner();

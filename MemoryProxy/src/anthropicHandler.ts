@@ -44,6 +44,7 @@ import { deriveTdaiIdentity } from "./tdai/identity.js";
 import { extractLatestUserMessage, recordTdaiTurn } from "./tdai/recorder.js";
 import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
+import { readRequestMemoryMode, resolveEffectiveMemoryMode, type MemoryCaptureMode } from "./tdai/memory-mode.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
 import type { CcRequestKind } from "./common/cc-request-classifier.js";
@@ -62,6 +63,7 @@ const SKIP_REQUEST_HEADERS = new Set([
   "connection",
   // 内部身份头只给 proxy/session-init 使用，不能透传给上游模型服务。
   "x-tdai-user-key",
+  "x-tdai-memory-mode",
 ]);
 
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -77,13 +79,16 @@ const SKIP_RESPONSE_HEADERS = new Set([
  * land on the correct kernel tenant. Falls back to config when the request
  * carries no spaceId (older single-tenant deployments).
  */
-function createTdaiClient(config: ProxyConfig, spaceId?: string): TdaiClient | null {
+function createTdaiClient(config: ProxyConfig, spaceId?: string, memoryMode?: MemoryCaptureMode): TdaiClient | null {
   if (!config.tdai.enabled || !config.tdai.memory.enabled || !config.tdai.endpoint) return null;
   return new TdaiClient({
     enabled: config.tdai.enabled && config.tdai.memory.enabled,
     endpoint: config.tdai.endpoint,
     apiKey: config.tdai.apiKey,
     serviceId: spaceId || config.tdai.serviceId,
+    promptMode: config.tdai.memory.promptMode,
+    memoryMode,
+    codeMemoryVersion: config.tdai.memory.codeMemoryVersion,
     writeL0: config.tdai.memory.writeL0,
     recallL1: config.tdai.memory.recallL1,
     injectL2L3: config.tdai.memory.injectL2L3,
@@ -273,13 +278,31 @@ function hasValidThinkingSignature(block: Record<string, unknown>): boolean {
 /**
  * Sanitize `thinking` blocks across all assistant messages.
  *
+ * Default: auto-detects by model name — strips for non-Anthropic models
+ * (deepseek, gpt, etc.), preserves signed blocks for Claude models.
+ *
+ * Anthropic's API requires thinking blocks to be passed back verbatim in
+ * multi-turn conversations. Non-Anthropic models don't support them and
+ * reject requests that contain them.
+ *
+ * Set env `PROXY_PRESERVE_THINKING_SIGNATURES=true` to force preservation
+ * regardless of model; set to `false` to force stripping.
+ *
  * Exported for unit testing.
  */
 export function sanitizeThinkingBlocks(
   body: Record<string, unknown>,
+  modelId?: string,
 ): { body: Record<string, unknown>; removed: number } {
   const messages = body.messages;
   if (!Array.isArray(messages)) return { body, removed: 0 };
+
+  // Auto-detect: preserve signed thinking blocks only for Anthropic models.
+  // Env var can override: "true" = force preserve, "false" = force strip.
+  const envOverride = process.env.PROXY_PRESERVE_THINKING_SIGNATURES;
+  const preserveSigned = envOverride !== undefined
+    ? envOverride === "true"
+    : (modelId ? /^claude/i.test(modelId) : false);
 
   let removed = 0;
   let changed = false;
@@ -293,7 +316,8 @@ export function sanitizeThinkingBlocks(
       const b = block as Record<string, unknown>;
       const isThinking = b.type === "thinking" || b.type === "redacted_thinking";
       if (!isThinking) return true;
-      if (hasValidThinkingSignature(b)) return true;
+      // Preserve only for Anthropic upstreams AND valid Ed25519 signature
+      if (preserveSigned && hasValidThinkingSignature(b)) return true;
       removed += 1;
       msgChanged = true;
       return false;
@@ -314,12 +338,13 @@ export function sanitizeThinkingBlocks(
 function buildUpstreamBody(
   body: Record<string, unknown>,
   target: ForwardTarget,
+  modelId?: string,
 ): { body: Record<string, unknown>; sanitizedCount: number } {
   let result = body;
   if (target.bodyOverrides) {
     result = { ...result, ...target.bodyOverrides };
   }
-  const sanitized = sanitizeThinkingBlocks(result);
+  const sanitized = sanitizeThinkingBlocks(result, modelId);
   return { body: sanitized.body, sanitizedCount: sanitized.removed };
 }
 
@@ -572,7 +597,8 @@ export async function handleAnthropicMessages(
   // 内部/外部用户一视同仁 —— internal callers must also request by
   // `modelName`, ensuring upstream ids and billing/observability keys align
   // across all traffic.
-  const requestedModel = typeof body.model === "string" ? body.model : "unknown";
+  const requestedModel = typeof body.model === "string" ? body.model : (config.upstream.defaultModel || "unknown");
+  if (typeof body.model !== "string") body.model = requestedModel;
   if (!isModelInPricing(config.creditPricing, requestedModel)) {
     return c.json(
       {
@@ -643,6 +669,9 @@ export async function handleAnthropicMessages(
   const { resolveConversationId } = await import("./session/session-key.js");
   const conversationId = resolveConversationId(c);
   const sessionKey = conversationId ?? resolveSessionKey(config, lcHeaders, c.req.path, body, keyId);
+
+  const requestMemoryMode = readRequestMemoryMode(c);
+  let memoryMode: MemoryCaptureMode = config.tdai.memory.promptMode;
 
   // ── Auth verification (user_key → user_id) ──────────────────────────────────────
   // Reuse the early verify result — it ran before body parse to decide the
@@ -716,7 +745,9 @@ export async function handleAnthropicMessages(
       // justRegistered=true 只是为了触发下游 prewarm，与状态机无关，那里
       // wentThroughSessionInitStateMachine=false 会自然过滤掉。
       let wentThroughSessionInitStateMachine = false;
-      if (recovered && isTerminalState) {
+      const isOneShotBypass = recovered?.bypassed && !recovered?.sessionInfo && !recovered?.agentDetail;
+      const needsHeaderAutoSelect = isOneShotBypass && presetIdentity;
+      if (recovered && isTerminalState && !needsHeaderAutoSelect) {
         // Recovery hit: keep original messages, only re-inject <session_context>
         // so this turn's system prompt carries agent/task context again.
         // 用户对话永远保留原样，包括 session_init form 交互 — 不做任何删除。
@@ -801,6 +832,28 @@ export async function handleAnthropicMessages(
         }
       }
 
+      // Freeze memory mode: first header on this session wins; later requests
+      // without the header reuse sessionInfo.memory_mode.
+      memoryMode = resolveEffectiveMemoryMode(
+        requestMemoryMode,
+        (initResult.sessionInfo as { memory_mode?: string } | null | undefined)?.memory_mode,
+        config.tdai.memory.promptMode,
+      );
+      if (memoryMode === "all" && config.tdai.memory.codeMemoryVersion !== "v2") {
+        return c.json(
+          { error: { message: "memory mode 'all' requires codeMemoryVersion=v2", type: "invalid_request_error", code: "invalid_memory_mode" } },
+          400,
+        );
+      }
+      if (initResult.sessionInfo) {
+        (initResult.sessionInfo as unknown as Record<string, unknown>).memory_mode = memoryMode;
+        try {
+          await store.freezeMemoryMode(compositeKey, memoryMode);
+        } catch (err) {
+          console.warn("[memory-mode] freeze failed:", err instanceof Error ? err.message : String(err));
+        }
+      }
+
       // Await prewarm so the first-turn pipeline always hits the cache.
       // A fire-and-forget void() here caused the bug where the pipeline
       // ran before the cache was populated, silently injecting zero
@@ -818,6 +871,7 @@ export async function handleAnthropicMessages(
             keyId: sessionKey,
             userId: userId || "anonymous",
             agentSource,
+            spaceId: spaceId || undefined,
             sessionInfo: initResult.sessionInfo as import("./session/types.js").SessionInfo,
             agentDetail: initResult.agentDetail ?? null,
             taskDetail: initResult.taskDetail ?? null,
@@ -862,6 +916,20 @@ export async function handleAnthropicMessages(
       sessionInfo = undefined;
       injectedSkipped = true;
     }
+  }
+
+  if (!config.sessionInit?.enabled || !conversationId || skipSessionInit) {
+    memoryMode = resolveEffectiveMemoryMode(
+      requestMemoryMode,
+      undefined,
+      config.tdai.memory.promptMode,
+    );
+  }
+  if (memoryMode === "all" && config.tdai.memory.codeMemoryVersion !== "v2") {
+    return c.json(
+      { error: { message: "memory mode 'all' requires codeMemoryVersion=v2", type: "invalid_request_error", code: "invalid_memory_mode" } },
+      400,
+    );
   }
 
   // ── mem: command intercept ────────────────────────────────────────────────
@@ -921,7 +989,7 @@ export async function handleAnthropicMessages(
       //   同步 await 保证 L0 落盘再返回，避免响应先返回后进程未 flush 就退出丢失。
       //   注意：只有 mem 命令时全网只有这一次落盘，跟主对话路径不同（那边有 SIGTERM
       //   trackWrite 兜底 + withL0Retry），这里必须显式等。
-      const tdaiClientForMem = createTdaiClient(config, spaceId);
+      const tdaiClientForMem = memoryMode === "none" ? null : createTdaiClient(config, spaceId, memoryMode);
       const tdaiIdentityForMem = deriveTdaiIdentity({
         sessionInfo: sessionInfo as Record<string, unknown> | null | undefined,
         userId: userId || null,
@@ -969,7 +1037,7 @@ export async function handleAnthropicMessages(
     }
   }
 
-  const tdaiClient = assetCapabilities?.chat_memory === false ? null : createTdaiClient(config, spaceId);
+  const tdaiClient = memoryMode === "none" || assetCapabilities?.chat_memory === false ? null : createTdaiClient(config, spaceId, memoryMode);
   const tdaiIdentity = injectedSkipped
     ? null
     : deriveTdaiIdentity({
@@ -978,7 +1046,7 @@ export async function handleAnthropicMessages(
         sessionKey,
         userKey: callerUserKey,
       });
-  const tdaiUserMessage = extractLatestUserMessage(messages);
+  const tdaiUserMessage = extractLatestUserMessage(messages, agentSource);
 
   // ── Context injection (before cost guard) ────────────────────────────────
   // CC 分流：
@@ -1006,7 +1074,9 @@ export async function handleAnthropicMessages(
         // 透传原始请求路径 —— AssetReflectionInjector 用它判断 `/analyse` marker。
         // 其它 injector 不依赖此字段。
         requestPath: c.req.path,
-        custom: sessionInfo ? { session: sessionInfo, userKey: callerUserKey ?? undefined, assetCapabilities } : undefined,
+        custom: sessionInfo
+          ? { session: sessionInfo, userKey: callerUserKey ?? undefined, assetCapabilities, memoryMode }
+          : { memoryMode },
         readOnly: requestKind === "fork",
       });
       body = injectedBody;
@@ -1138,7 +1208,7 @@ export async function handleAnthropicMessages(
     ? (agentUpstreamEntry.apiKey ?? "")
     : config.upstream.apiKey;
   const upstreamHeaders = buildUpstreamHeaders(c, config, target, sessionKey, effectiveApiKey);
-  const { body: upstreamBody, sanitizedCount } = buildUpstreamBody(body, target);
+  const { body: upstreamBody, sanitizedCount } = buildUpstreamBody(body, target, target.model);
   if (sanitizedCount > 0) {
     pipe.info(
       "FORWARD",
@@ -1166,7 +1236,7 @@ export async function handleAnthropicMessages(
     delete originalHeaders["authorization"];
   }
 
-  const retryBody = sanitizeThinkingBlocks(body).body;
+  const retryBody = sanitizeThinkingBlocks(body, target.model).body;
 
   // ── Forward to upstream (with automatic retry if configured) ──────────────
   const forwardTimeoutMs = config.server.forwardTimeoutMs ?? 600_000;

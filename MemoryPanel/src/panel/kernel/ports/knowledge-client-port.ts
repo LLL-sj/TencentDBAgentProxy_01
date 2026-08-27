@@ -151,6 +151,61 @@ export interface CodeGraphToolResult {
   isError: boolean;
 }
 
+// ── Team Notes ──
+
+export interface NoteTagView {
+  tag_slug: string;
+  tag_label: string;
+}
+
+export interface NoteDetail {
+  note_id: string;
+  service_id: string;
+  team_id: string;
+  seq_no: number;
+  title: string;
+  filename: string;
+  content: string;
+  content_hash: string;
+  author_user_id: string;
+  version: number;
+  status: string;
+  tags: NoteTagView[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NoteSummary {
+  note_id: string;
+  team_id: string;
+  seq_no: number;
+  title: string;
+  filename: string;
+  author_user_id: string;
+  version: number;
+  status: string;
+  tags: NoteTagView[];
+  snippet: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NoteListResult {
+  items: NoteSummary[];
+  total: number;
+}
+
+export interface NoteTagSummary {
+  tag_slug: string;
+  tag_label: string;
+  note_count: number;
+}
+
+export interface NotesGraphData {
+  nodes: Array<{ id: string; label: string; type: 'note' | 'tag'; path: string | null; linkCount: number }>;
+  edges: Array<{ source: string; target: string; type: 'has_tag'; weight: number }>;
+}
+
 // ── Port ──
 
 export interface KnowledgeClientPort {
@@ -186,4 +241,17 @@ export interface KnowledgeClientPort {
   codeGraphDelete(codeGraphIds: string[]): Promise<BatchDeleteResult>;
   codeGraphUpdateMeta(codeGraphId: string, patch: { repo_name?: string; summary?: string | null }): Promise<CodeGraphDetail>;
   codeGraphQuery(codeGraphId: string, tool: string, params: Record<string, unknown>): Promise<CodeGraphToolResult>;
+
+    // Team Notes — team-scoped lightweight markdown notes
+    noteCreate(teamId: string, input: { title: string; filename?: string; content: string; tags: string[] }, userId?: string): Promise<NoteDetail>;
+    noteGet(teamId: string, noteId: string): Promise<NoteDetail>;
+    noteUpdate(teamId: string, noteId: string, expectedVersion: number, patch: { title?: string; filename?: string; content?: string; tags?: string[] }, userId?: string): Promise<NoteDetail>;
+    noteArchive(teamId: string, noteId: string, expectedVersion?: number): Promise<NoteDetail>;
+    noteList(teamId: string, opts?: { tags?: string[]; limit?: number; offset?: number; includeArchived?: boolean }): Promise<NoteListResult>;
+    noteSearch(teamId: string, query: string, opts?: { tags?: string[]; limit?: number; offset?: number }): Promise<NoteListResult>;
+    noteTagsList(teamId: string): Promise<{ items: NoteTagSummary[] }>;
+    noteTagPages(teamId: string, tagSlug: string): Promise<{ tag: NoteTagSummary; items: NoteSummary[] }>;
+    noteGraph(teamId: string): Promise<NotesGraphData>;
+    noteMermaid(teamId: string, direction?: 'LR' | 'TB'): Promise<{ mermaid: string }>;
+    noteRevisions(teamId: string, noteId: string): Promise<{ items: Array<{ revision_id: string; version: number; edited_by: string; created_at: string }> }>;
 }

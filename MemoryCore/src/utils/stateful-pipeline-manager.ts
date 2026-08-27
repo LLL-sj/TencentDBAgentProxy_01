@@ -20,6 +20,7 @@
 import type { IStateBackend, TaskPayload } from "../core/state/types.js";
 import type { PipelineSessionState as StatePipelineSessionState } from "../core/state/types.js";
 import { buildPipelineTimerMember } from "../core/state/timer-member.js";
+import { normalizeMemoryCaptureMode, type MemoryCaptureMode } from "../core/memory-mode.js";
 import type { PipelineSessionState as CheckpointPipelineSessionState } from "./checkpoint.js";
 import { SessionFilter } from "./session-filter.js";
 import { report } from "../core/report/reporter.js";
@@ -87,6 +88,7 @@ export class StatefulPipelineManager {
   private readonly l2MinIntervalMs: number;
   private readonly l2MaxIntervalMs: number;
   private readonly sessionActiveWindowMs: number;
+  private readonly defaultMemoryMode: MemoryCaptureMode;
 
   private readonly stateBackend: IStateBackend;
   /** 默认 instanceId（standalone 模式/checkpoint 恢复用）。service 模式下每次调用显式传入。 */
@@ -111,6 +113,7 @@ export class StatefulPipelineManager {
     instanceId: string,
     logger?: Logger,
     sessionFilter?: SessionFilter,
+    defaultMemoryMode: MemoryCaptureMode = "chat",
   ) {
     this.l1IdleTimeoutMs = config.l1.idleTimeoutSeconds * 1000;
     this.everyNConversations = config.everyNConversations;
@@ -119,6 +122,7 @@ export class StatefulPipelineManager {
     this.l2MinIntervalMs = config.l2.minIntervalSeconds * 1000;
     this.l2MaxIntervalMs = config.l2.maxIntervalSeconds * 1000;
     this.sessionActiveWindowMs = config.l2.sessionActiveWindowHours * 60 * 60 * 1000;
+    this.defaultMemoryMode = defaultMemoryMode;
     this.stateBackend = stateBackend;
     this.defaultInstanceId = instanceId;
     this.logger = logger;
@@ -159,6 +163,7 @@ export class StatefulPipelineManager {
           last_extraction_time: state.last_extraction_time,
           last_extraction_updated_time: state.last_extraction_updated_time,
           l2_last_extraction_time: state.l2_last_extraction_time,
+          memory_mode: state.memory_mode,
         });
         restored++;
       }
@@ -179,6 +184,7 @@ export class StatefulPipelineManager {
     rounds?: number,
     teamId?: string,
     agentId?: string,
+    memoryMode?: string,
   ): Promise<void> {
     if (this.destroyed) return;
     if (this.sessionFilter.shouldSkip(sessionKey)) return;
@@ -192,6 +198,10 @@ export class StatefulPipelineManager {
     const now = Date.now();
     const state = await this.stateBackend.getSessionState(effectiveInstanceId, sessionKey, teamId, agentId);
     const warmupThreshold = this.getEffectiveThreshold(state?.warmup_threshold ?? (this.enableWarmup ? 1 : 0));
+    const effectiveMemoryMode = normalizeMemoryCaptureMode(
+      memoryMode ?? state?.memory_mode,
+      this.defaultMemoryMode,
+    );
 
     const taskPayload: TaskPayload = {
       id: `L1-${sessionKey}-${now}`,
@@ -201,7 +211,7 @@ export class StatefulPipelineManager {
       teamId,
       agentId,
       priority: 0,
-      data: { instanceId: effectiveInstanceId, teamId, agentId, ...serializeTraceContext() },
+      data: { instanceId: effectiveInstanceId, teamId, agentId, memoryMode: effectiveMemoryMode, ...serializeTraceContext() },
       createdAt: now,
     };
 
@@ -211,6 +221,7 @@ export class StatefulPipelineManager {
       teamId,
       agentId,
       messageJson: "[]", // 实际消息已持久化到 VDB/JSONL，这里只做计数
+      memoryMode: effectiveMemoryMode,
       threshold: warmupThreshold,
       fireAtMs: now + this.l1IdleTimeoutMs,
       timerMember: buildPipelineTimerMember(sessionKey, "L1_idle", { teamId, agentId }),
@@ -340,7 +351,7 @@ export class StatefulPipelineManager {
     }
     await this.stateBackend.setTimer(
       effectiveId,
-      `${sessionKey}:L2_schedule`,
+      buildPipelineTimerMember(sessionKey, "L2_schedule", { teamId, agentId }),
       Date.now() + this.l2MaxIntervalMs,
     );
   }
@@ -368,6 +379,11 @@ export class StatefulPipelineManager {
       return;
     }
     const now = Date.now();
+    const state = await this.stateBackend.getSessionState(effectiveId, sessionKey, teamId, agentId);
+    const memoryMode = normalizeMemoryCaptureMode(
+      state?.memory_mode ?? this.defaultMemoryMode,
+      this.defaultMemoryMode,
+    );
     await this.stateBackend.enqueueTask({
       id: `L1-drain-${sessionKey}-${now}`,
       type: "L1",
@@ -376,7 +392,7 @@ export class StatefulPipelineManager {
       teamId,
       agentId,
       priority: 0,
-      data: { instanceId: effectiveId, teamId, agentId, ...serializeTraceContext() },
+      data: { instanceId: effectiveId, teamId, agentId, memoryMode, ...serializeTraceContext() },
       createdAt: now,
     });
     this.logger?.debug?.(
@@ -487,6 +503,7 @@ export class StatefulPipelineManager {
             l2_pending_l1_count: state.l2_pending_l1_count,
             warmup_threshold: state.warmup_threshold,
             l2_last_extraction_time: state.l2_last_extraction_time,
+            memory_mode: state.memory_mode,
           };
         }
       }

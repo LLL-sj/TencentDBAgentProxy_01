@@ -103,6 +103,7 @@ import { StorageAdapter } from "../core/storage/adapter.js";
 import type { TaskPayload } from "../core/state/types.js";
 import type { TaskExecutor } from "../services/pipeline-worker.js";
 import type { IStateBackend } from "../core/state/types.js";
+import { normalizeMemoryCaptureMode, type MemoryCaptureMode } from "../core/memory-mode.js";
 import type { TimerScanner } from "../services/timer-scanner.js";
 import type { PipelineWorker } from "../services/pipeline-worker.js";
 import type { StatefulPipelineManager } from "../utils/stateful-pipeline-manager.js";
@@ -935,8 +936,9 @@ export class TdaiGateway {
             rounds: number,
             teamId?: string,
             agentId?: string,
+            memoryMode?: string,
           ) => {
-            await pipelineManager.notifyConversation(sessionId, [], instanceId, rounds, teamId, agentId);
+            await pipelineManager.notifyConversation(sessionId, [], instanceId, rounds, teamId, agentId, memoryMode);
           };
         }
 
@@ -2389,6 +2391,10 @@ export class TdaiGateway {
         if (!instanceId) throw new Error(`L1 task ${task.id} missing instanceId`);
         const teamId = task.teamId ?? (typeof task.data?.teamId === "string" ? task.data.teamId : undefined);
         const agentId = task.agentId ?? (typeof task.data?.agentId === "string" ? task.data.agentId : undefined);
+        let memoryMode: MemoryCaptureMode = normalizeMemoryCaptureMode(
+          task.data?.memoryMode,
+          gateway.config.memory.promptMode,
+        );
 
         // H-11 Step 2: early abort check — if pipeline-worker already lost its lock
         // before we even started, bail out without doing any work.
@@ -2401,7 +2407,9 @@ export class TdaiGateway {
             gateway.logger.debug?.(`[executor] L1 skipped: session ${task.sessionId} already processed (count=0)`);
             return;
           }
+          if (state?.memory_mode) memoryMode = state.memory_mode;
         }
+        if (task.data) task.data.memoryMode = memoryMode;
 
         // Credit quota check before LLM call
         if (gateway.quotaManager) {
@@ -2418,7 +2426,7 @@ export class TdaiGateway {
         core.setInstanceId(instanceId);
         const { store, embedding } = await resolveStore(task);
         const storage = await resolveStorage(task);
-        const result = await core.runL1WithStore(task.sessionId, store, embedding, storage ?? undefined);
+        const result = await core.runL1WithStore(task.sessionId, store, embedding, storage ?? undefined, memoryMode);
 
         (task as any)._l2ProfileScopes = result.profileScopes;
 
@@ -2456,6 +2464,10 @@ export class TdaiGateway {
         if (!instanceId) throw new Error(`L2 task ${task.id} missing instanceId`);
         const teamId = task.teamId ?? (typeof task.data?.teamId === "string" ? task.data.teamId : undefined);
         const agentId = task.agentId ?? (typeof task.data?.agentId === "string" ? task.data.agentId : undefined);
+        let memoryMode: MemoryCaptureMode = normalizeMemoryCaptureMode(
+          task.data?.memoryMode,
+          gateway.config.memory.promptMode,
+        );
 
         if (signal?.aborted) throw signal.reason ?? new Error("executeL2: aborted before start");
 
@@ -2476,7 +2488,9 @@ export class TdaiGateway {
           if (state?.l2_last_extraction_time) {
             cursor = state.l2_last_extraction_time;
           }
+          if (state?.memory_mode) memoryMode = state.memory_mode;
         }
+        if (task.data) task.data.memoryMode = memoryMode;
 
         if (signal?.aborted) throw signal.reason ?? new Error("executeL2: aborted before LLM");
 
@@ -2494,7 +2508,35 @@ export class TdaiGateway {
           } catch { /* ok */ }
         }
 
-        const result = await core.runL2WithStore(task.sessionId, store, storage ?? undefined, cursor);
+        const l2MemoryMode: MemoryCaptureMode = memoryMode === "all" ? "chat" : memoryMode;
+        if (l2MemoryMode === "none") {
+          gateway.logger.debug?.(`[executor] L2 skipped for memory-mode=none session ${task.sessionId}`);
+          (task as any)._l2Skipped = true;
+          return;
+        }
+        if (l2MemoryMode === "code" && gateway.config.memory.codeMemoryVersion === "v2") {
+          // Code v2 L2/L3 are produced by project-memory-packager. Run it
+          // directly instead of faking a skip; mark skipped only when the
+          // packager reports that there were no new L1 records to package.
+          const packagerResult = await core.runProjectMemoryPackagerWithStore(
+            store,
+            teamId ?? "",
+            agentId ?? "",
+            storage ?? undefined,
+          );
+          gateway.logger.debug?.(
+            `[executor] L2 code v2 project packager team=${teamId ?? "(none)"} agent=${agentId ?? "(none)"} skipped=${packagerResult.skipped} reason=${packagerResult.reason}`,
+          );
+          if (packagerResult.skipped) (task as any)._l2Skipped = true;
+          if (gateway.quotaManager && !packagerResult.skipped) {
+            const reportCredit = gateway.reportedCreditFor(packagerResult.creditUsed, "L2");
+            if (reportCredit > 0) {
+              gateway.quotaManager.reportUsage(instanceId, 0, reportCredit, "L2").catch(() => {});
+            }
+          }
+          return;
+        }
+        const result = await core.runL2WithStore(task.sessionId, store, storage ?? undefined, cursor, l2MemoryMode);
 
         // Mark task as skipped if L2 had no new records to process
         if (result.skipped) {
@@ -2522,6 +2564,16 @@ export class TdaiGateway {
       async executeL3(task: TaskPayload, signal?: AbortSignal) {
         const instanceId = typeof task.data?.instanceId === "string" ? task.data.instanceId : undefined;
         if (!instanceId) throw new Error(`L3 task ${task.id} missing instanceId`);
+        const memoryMode: MemoryCaptureMode = normalizeMemoryCaptureMode(
+          task.data?.memoryMode,
+          gateway.config.memory.promptMode,
+        );
+        if (memoryMode === "none") return;
+        if (memoryMode === "code" && gateway.config.memory.codeMemoryVersion === "v2") {
+          // Code v2 L3 (project/MEMORY.md) is rebuilt by the packager.
+          gateway.logger.debug?.(`[executor] L3 skipped for code v2 session; MEMORY.md already rebuilt by packager`);
+          return;
+        }
 
         if (signal?.aborted) throw signal.reason ?? new Error("executeL3: aborted before start");
 
@@ -2548,7 +2600,7 @@ export class TdaiGateway {
 
         core.setInstanceId(instanceId);
         const { store } = await resolveStore(task);
-        const result = await core.runL3WithStore(store, storage ?? undefined);
+        const result = await core.runL3WithStore(store, storage ?? undefined, memoryMode);
 
         // Report credit + memory (only +1 on first persona creation)
         // provider=proxy 模式下 credit 由 context_proxy 上报，此处仅报 memory delta。

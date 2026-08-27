@@ -74,6 +74,7 @@ function isClaudeCodeInternalPrompt(text: string): boolean {
   if (!t) return false;
   return CC_INTERNAL_PROMPT_PATTERNS.some((re) => re.test(t));
 }
+/**
 
 /**
  * 从原始 user content 文本抽取用户真实键入。
@@ -85,7 +86,7 @@ function isClaudeCodeInternalPrompt(text: string): boolean {
  * agent-adapters 各自的 extractUserText 实现）。
  */
 export function extractUserQueryText(raw: string): string {
-  // 0) CC 内部 prompt / tool_result 伪装 / 表单回执 → 整条丢弃（不写 L0）
+  // 0) CC 内部 prompt / Codex 系统消息 / tool_result 伪装 / 表单回执 → 整条丢弃
   //    这是最高优先级：即便同时含 <user_query> 也整条判定为非人类输入。
   //    真实用户输入不会命中这些锚定在开头/整串的模式。
   if (isClaudeCodeInternalPrompt(raw)) return "";
@@ -126,9 +127,52 @@ export function extractUserQueryText(raw: string): string {
     "persisted-output", "persisted_output",
     "tool_use_error", "tool-use-error",
     "tool_result", "tool-result",
+    "INSTRUCTIONS",  // Codex approval flow: wraps AGENTS.md injected as user message
   ]) {
     text = text.replace(new RegExp(`<${tag}[^>]*>[\\s\\S]*?<\\/${tag}>`, "gi"), "");
   }
+
+
+  // 2b2) 非 XML 纯文本系统段：某些 agent / 工具在 user message 的 text block
+  //     中内嵌了系统指令文本（不是 XML wrapper，无法在结构层过滤）。
+  //     按内容特征识别并移除。匹配规则保守锚定于唯一句式开头，避免误伤用户输入。
+  //
+  //     新增规则指南：
+  //       - 匹配文本必须是 agent 工具**自动注入**的固定句式，而非用户可能键入的
+  //       - 优先用整句或整段匹配（含上下文关键词），不单独匹配常见单词
+  //       - 每条规则标注来源（哪个工具/场景产生）
+
+  // 2b2-i) Agent workspace 提示前缀（Multica 等）：
+  //     "You are running as a chat assistant for a ... workspace. ... User message:"
+  //     只保留 "User message:" 之后的真实用户问题。
+  text = text.replace(
+    /You are running as a chat assistant for a \w+ workspace\.[\s\S]*?User message:\s*/i,
+    "",
+  );
+
+  // 2b2-ii) Agent 向 user message 注入的工具使用说明段落。
+  //     句式固定、跨行，匹配到下一个空行或 markdown 标题为止。
+  //     来源：Multica attachment upload 提示、CC task initiator 附属说明。
+  text = text.replace(
+    /\bTo include a file or image you produced in your reply, run `[^`]+`[\s\S]*?(?=\n\n|\n##|$)/gi,
+    "",
+  );
+  text = text.replace(
+    /\bThe command also returns a `markdown` snippet[\s\S]*?(?=\n\n|\n##|$)/gi,
+    "",
+  );
+  text = text.replace(
+    /\bYour [A-Z][a-z]+ credentials stay scoped to the runtime owner[\s\S]*?(?=\n\n|\n##|$)/gi,
+    "",
+  );
+  text = text.replace(
+    /\bThe initiator — not the runtime owner — is who you are answering[\s\S]*?(?=\n\n|\n##|$)/gi,
+    "",
+  );
+
+  // 2b2-iii) "## Task Initiator" markdown section：
+  //     agent 在 user message 末尾附加的任务归属元数据，非用户输入。
+  text = text.replace(/\n## Task Initiator[\s\S]*?(?=\n##|$)/gi, "");
 
   // 2c) 行级过滤：单行匹配的 tool 回显 / 文件片段 / memory frontmatter
   //     每条规则单行判定，匹配则删除该行；不阻断其它行的用户输入。

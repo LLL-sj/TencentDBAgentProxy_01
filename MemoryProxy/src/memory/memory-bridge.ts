@@ -51,6 +51,9 @@ const ALLOWED_SUBPATHS = new Set<string>([
   "conversation/query",   // L0 按 session 取历史
   "scenario/ls",          // L2 场景列表（path 索引）
   "scenario/read",        // L2 按 path 读全文
+  "project/list",         // Code Memory v2 L3 index / topic 列表
+  "project/read",         // Code Memory v2 topic 全文（按 path）
+  "project/search",       // Code Memory v2 topic 搜索
 ]);
 
 interface SessionIdFields {

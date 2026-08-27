@@ -59,6 +59,8 @@ export interface RunnerSessionState {
 export interface PipelineSessionState {
   /** Conversation rounds since last L1 trigger */
   conversation_count: number;
+  /** Frozen per-session capture mode (chat | code | all | none). */
+  memory_mode?: "chat" | "code" | "all" | "none";
   /** ISO timestamp of the last extraction completion */
   last_extraction_time: string;
   /** ISO timestamp cursor for incremental extraction reads */
@@ -116,6 +118,7 @@ const DEFAULT_RUNNER_STATE: RunnerSessionState = {
 
 const DEFAULT_PIPELINE_STATE: PipelineSessionState = {
   conversation_count: 0,
+  memory_mode: undefined,
   last_extraction_time: "",
   last_extraction_updated_time: "",
   last_active_time: 0,
@@ -236,6 +239,7 @@ export class CheckpointManager {
             last_active_time: (state.last_active_time as number) ?? 0,
             l2_pending_l1_count: (state.l2_pending_l1_count as number) ?? 0,
             l2_last_extraction_time: (state.l2_last_extraction_time as string) ?? "",
+            memory_mode: (state.memory_mode as "chat" | "code" | "all" | "none" | undefined) ?? undefined,
           };
         }
       } else {

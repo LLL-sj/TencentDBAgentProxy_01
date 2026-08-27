@@ -14,11 +14,13 @@ import {
   CodeIcon,
   ToolsIcon,
   ChatIcon,
+  FileIcon,
 } from 'tea-icons-react';
 
 export type PageId =
   | 'workbench_board'
   | 'wiki'
+  | 'team_notes'
   | 'code'
   | 'skills'
   | 'chat_memory'
@@ -44,6 +46,7 @@ export function usePageMeta(): Record<PageId, PageMeta> {
   const { t } = useTranslation();
   return {
     workbench_board: { id: 'workbench_board', label: t('menu.workbench_board'), desc: t('menu.desc.workbench_board'), group: t('menu.group.workbench'), order: 0, affix: true },
+    team_notes:      { id: 'team_notes',      label: t('menu.team_notes'), desc: t('menu.desc.team_notes'), group: t('menu.group.assets'), order: 2.5 },
     wiki:            { id: 'wiki',            label: t('menu.wiki'), desc: t('menu.desc.wiki'), group: t('menu.group.assets'), order: 2 },
     code:            { id: 'code',            label: t('menu.code'), desc: t('menu.desc.code'), group: t('menu.group.assets'), order: 3 },
     skills:          { id: 'skills',          label: t('menu.skills'), desc: t('menu.desc.skills'), group: t('menu.group.assets'), order: 4 },
@@ -64,6 +67,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
   team_agents: <UsergroupIcon size={16} />,
   api_keys: <LockOnIcon size={16} />,
   wiki: <BooksIcon size={16} />,
+  team_notes: <FileIcon size={16} />,
   code: <CodeIcon size={16} />,
   skills: <ToolsIcon size={16} />,
   chat_memory: <ChatIcon size={16} />,

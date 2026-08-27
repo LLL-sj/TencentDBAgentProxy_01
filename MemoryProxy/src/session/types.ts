@@ -166,8 +166,12 @@ export interface SessionRegistrationData {
  * The real backend returns more (created_at, updated_at, …) — we keep the
  * shape loose with `permissions` etc. optional so future fields don't break us.
  */
+export type SessionMemoryMode = "chat" | "code" | "all" | "none";
+
 export interface SessionInfo {
   session_id: string;
+  /** Frozen memory capture mode for this session (first x-tdai-memory-mode header wins). */
+  memory_mode?: SessionMemoryMode;
   team_id: string;
   agent_id: string;
   user_id: string;

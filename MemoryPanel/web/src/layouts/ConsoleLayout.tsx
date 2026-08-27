@@ -20,6 +20,7 @@ const { Body, Sider, Content } = Layout;
 const PATH_TO_PAGE: Record<string, PageId> = {
   '/': 'workbench_board',
   '/wiki': 'wiki',
+  '/notes': 'team_notes',
   '/code': 'code',
   '/skills': 'skills',
   '/memory': 'chat_memory',
@@ -38,6 +39,8 @@ function legacyHashToPath(): string | null {
   const leaf = raw.split('/').filter(Boolean).pop();
   if (!leaf) return null;
   if (leaf === 'wiki') return '/wiki';
+  if (leaf === 'notes' || leaf === 'team_notes' || leaf === 'team-notes') return '/notes';
+  if (leaf === 'tips' || leaf === 'summary_tips' || leaf === 'summary-tips') return '/memory';
   if (leaf === 'code') return '/code';
   if (leaf === 'skills' || leaf === 'skill') return '/skills';
   if (leaf === 'chat_memory' || leaf === 'memory' || leaf === 'chat-memory') return '/memory';

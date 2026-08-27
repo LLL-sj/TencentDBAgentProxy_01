@@ -102,6 +102,7 @@ async function createSeedPipeline(opts: SeedRuntimeOptions): Promise<{ pipeline:
     openclawConfig,
     logger,
     l1LlmRunner,
+    projectMemoryLLMRunner: l2l3LlmRunner,
   });
 
   // Wire L2 runner via shared factory (same logic as index.ts live runtime)

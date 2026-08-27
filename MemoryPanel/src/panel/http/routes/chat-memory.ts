@@ -795,6 +795,9 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
     // 后端转换为 time_end（-1ms 排他）传给内核 /v3/conversation/query，offset 归零。
     // 这样 VDB 只需 filter recorded_at_ms < cursor 即可，不需要 skip 大量记录。
     const beforeTs = typeof body?.before_ts === 'string' ? body.before_ts.trim() : undefined;
+    const memoryMode = body?.memory_mode === 'chat' || body?.memory_mode === 'code'
+      ? body.memory_mode
+      : undefined;
 
     if (!blockId) return respondControlError(c, 400, 'MISSING_BLOCK_ID');
     if (!['L0', 'L1', 'L2', 'L3'].includes(layerRaw)) return respondControlError(c, 400, 'INVALID_LAYER');
@@ -942,36 +945,71 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
       }
 
       if (layer === 'L1') {
-        const env = await deps.kernelHttp.postEnvelope<{ items?: unknown[]; total?: number }>(
-          '/v3/atomic/query',
-          { ...idFields, limit, offset },
-          cred,
-        );
-        if (env.code !== 0) return respondEnvelope(c, env);
-        const data = (env.data as { items?: Array<Record<string, unknown>>; total?: number } | null) ?? { items: [] };
-        return respondEnvelope(
-          c,
-          okEnvelope(c, {
+        // chat/code 面板复用同一底层 L1 表，但展示语义不同：
+        //   chat: persona / episodic / instruction
+        //   code: work_fact / work_task / work_method / work_artifact
+        // 记录本身没有 memory_mode 字段，这里按 type 白名单过滤。
+        const CHAT_L1_TYPES = new Set(['persona', 'episodic', 'instruction']);
+        const CODE_L1_TYPES = new Set(['work_fact', 'work_task', 'work_method', 'work_artifact']);
+        const typeFilter = memoryMode === 'chat' ? CHAT_L1_TYPES : memoryMode === 'code' ? CODE_L1_TYPES : null;
+        const mapL1 = (r: Record<string, unknown>) => ({
+          id: r.record_id ?? r.id,
+          title: (r.type ?? 'atomic') as string,
+          body: r.content ?? '',
+          tags: r.tags ?? [],
+          refs: [],
+          // L1 时间来源（v3 内核实际返回）：
+          //   - created_at（ISO 字符串）—— 内核 atomic/query 的标准字段
+          //   - created_time_ms（数值 ms） / timestamp_str —— 老数据兼容
+          created_at:
+            (typeof r.created_at === 'string' && r.created_at) ||
+            msToIso(r.created_time_ms) ||
+            (typeof r.timestamp_str === 'string' && r.timestamp_str ? r.timestamp_str : undefined),
+        });
+
+        if (!typeFilter) {
+          const env = await deps.kernelHttp.postEnvelope<{ items?: unknown[]; total?: number }>(
+            '/v3/atomic/query',
+            { ...idFields, limit, offset },
+            cred,
+          );
+          if (env.code !== 0) return respondEnvelope(c, env);
+          const data = (env.data as { items?: Array<Record<string, unknown>>; total?: number } | null) ?? { items: [] };
+          return respondEnvelope(c, okEnvelope(c, {
             layer,
-            items: (data.items ?? []).map((r) => ({
-              id: r.record_id ?? r.id,
-              title: (r.type ?? 'atomic') as string,
-              body: r.content ?? '',
-              tags: r.tags ?? [],
-              refs: [],
-              // L1 时间来源（v3 内核实际返回）：
-              //   - created_at（ISO 字符串）—— 内核 atomic/query 的标准字段
-              //   - created_time_ms（数值 ms） / timestamp_str —— 老数据兼容
-              created_at:
-                (typeof r.created_at === 'string' && r.created_at) ||
-                msToIso(r.created_time_ms) ||
-                (typeof r.timestamp_str === 'string' && r.timestamp_str ? r.timestamp_str : undefined),
-            })),
+            items: (data.items ?? []).map(mapL1),
             total: data.total ?? (data.items ?? []).length,
             limit,
             offset,
-          }),
-        );
+          }));
+        }
+
+        const filtered: Array<Record<string, unknown>> = [];
+        let coreTotal = 0;
+        const CORE_PAGE_SIZE = 100;
+        for (let coreOffset = 0; coreOffset < 2000; coreOffset += CORE_PAGE_SIZE) {
+          const env = await deps.kernelHttp.postEnvelope<{ items?: unknown[]; total?: number }>(
+            '/v3/atomic/query',
+            { ...idFields, limit: CORE_PAGE_SIZE, offset: coreOffset },
+            cred,
+          );
+          if (env.code !== 0) return respondEnvelope(c, env);
+          const data = (env.data as { items?: Array<Record<string, unknown>>; total?: number } | null) ?? { items: [] };
+          const pageItems = data.items ?? [];
+          coreTotal = data.total ?? pageItems.length;
+          for (const r of pageItems) {
+            if (typeof r?.type === 'string' && typeFilter.has(r.type)) filtered.push(r);
+          }
+          if (filtered.length >= coreTotal || pageItems.length < CORE_PAGE_SIZE) break;
+        }
+        const page = filtered.slice(offset, offset + limit);
+        return respondEnvelope(c, okEnvelope(c, {
+          layer,
+          items: page.map(mapL1),
+          total: filtered.length,
+          limit,
+          offset,
+        }));
       }
 
       if (layer === 'L2') {

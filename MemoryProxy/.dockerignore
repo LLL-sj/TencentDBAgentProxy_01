@@ -44,6 +44,13 @@ scripts/smoke-*
 scripts/mock-shark-*
 e2e/
 
+# 本地备份（工作树保留，但不进镜像）
+# Docker 的 *.bak 只匹配 context 根目录；**/ 才能覆盖 src/ 等子目录。
+**/*.bak
+**/*.bak-*
+**/*.bak2
+**/*.bak3
+
 # 容器相关自身
 Dockerfile
 .dockerignore

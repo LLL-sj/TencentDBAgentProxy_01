@@ -14,6 +14,14 @@
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";
 
+/** Code Memory version switch. v1 keeps the current pipeline untouched. */
+export type CodeMemoryVersion = "v1" | "v2";
+
+import {
+  DEFAULT_L1_V2_SHORT_TEXTS,
+  type L1V2ShortTexts,
+} from "./core/prompts/code-v2/l1-extraction-with-tips.js";
+
 /** Capture settings — controls L0 conversation recording. */
 export interface CaptureConfig {
   /** Enable auto-capture (default: true) */
@@ -307,10 +315,39 @@ export interface OffloadConfig {
   compactionTimeoutMs?: number;
 }
 
+/** L0.5 task-summary tips settings. */
+export interface TipsConfig {
+  enabled: boolean;
+  reminderEnabled: boolean;
+  maxReminderPerTask: number;
+  reminderCooldownSeconds: number;
+  submitPath: string;
+}
+
+/** Configurable short texts for the L1 v2 prompt (approved §4 keys). */
+export type L1V2PromptConfig = L1V2ShortTexts;
+
+/** Code Memory v2 project packager settings (used by Phase 4+). */
+export interface ProjectMemoryConfig {
+  enabled: boolean;
+  minPendingTips: number;
+  minDistinctSessions: number;
+  packagerMinIntervalSeconds: number;
+  packagerMaxIntervalSeconds: number;
+  /** Maximum number of L2 topic files per team+agent (merge pressure like chat maxScenes). */
+  maxTopics: number;
+  indexMaxChars: number;
+  topicMaxChars: number;
+}
+
 /** Fully resolved plugin configuration (v3). */
 export interface MemoryTdaiConfig {
   /** Global prompt family; group-level promptMode can override it. */
   promptMode: MemoryPromptMode;
+  /** Code Memory version switch. Default v1 keeps old behavior unchanged. */
+  codeMemoryVersion: CodeMemoryVersion;
+  /** L1 v2 short texts (SUMMARY_TIP block template + no-tips / rule text). */
+  l1V2: L1V2PromptConfig;
   capture: CaptureConfig;
   extraction: ExtractionConfig;
   persona: PersonaConfig;
@@ -335,6 +372,10 @@ export interface MemoryTdaiConfig {
    */
   llm: StandaloneLLMOverrideConfig;
   offload: OffloadConfig;
+  /** L0.5 summary tips settings (Code Memory v2). */
+  tips: TipsConfig;
+  /** Project memory packager settings (Code Memory v2 Phase 4). */
+  projectMemory: ProjectMemoryConfig;
   /**
    * Optional Skill module config. Pass-through to `resolveSkillConfig()` at
    * the host wiring layer; defaults are applied there. When absent, the
@@ -384,6 +425,17 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
 
   // --- Pipeline ---
   const pipelineGroup = obj(c, "pipeline");
+
+  // --- Code Memory version + L1 v2 short texts ---
+  const memoryGroup = obj(c, "memory");
+  const codeMemoryVersion = normalizeCodeMemoryVersion(
+    str(memoryGroup, "codeMemoryVersion") ?? str(c, "codeMemoryVersion"),
+  );
+  const l1V2Group = obj(c, "l1V2");
+
+  // --- L0.5 tips / project memory (Code Memory v2) ---
+  const tipsGroup = obj(c, "tips");
+  const projectMemoryGroup = obj(c, "projectMemory");
 
   // --- Recall ---
   const recallGroup = obj(c, "recall");
@@ -538,6 +590,24 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
 
   return {
     promptMode: globalPromptMode,
+    codeMemoryVersion,
+    l1V2: {
+      summaryTipBlockTemplate:
+        str(l1V2Group, "summaryTipBlockTemplate")
+        ?? str(l1V2Group, "SUMMARY_TIP_BLOCK_TEMPLATE")
+        ?? str(c, "L1_V2_SUMMARY_TIP_BLOCK_TEMPLATE")
+        ?? DEFAULT_L1_V2_SHORT_TEXTS.summaryTipBlockTemplate,
+      noSummaryTipsText:
+        str(l1V2Group, "noSummaryTipsText")
+        ?? str(l1V2Group, "NO_SUMMARY_TIPS_TEXT")
+        ?? str(c, "L1_V2_NO_SUMMARY_TIPS_TEXT")
+        ?? DEFAULT_L1_V2_SHORT_TEXTS.noSummaryTipsText,
+      summaryTipRuleText:
+        str(l1V2Group, "summaryTipRuleText")
+        ?? str(l1V2Group, "SUMMARY_TIP_RULE_TEXT")
+        ?? str(c, "L1_V2_SUMMARY_TIP_RULE_TEXT")
+        ?? DEFAULT_L1_V2_SHORT_TEXTS.summaryTipRuleText,
+    },
     capture: {
       enabled: bool(captureGroup, "enabled") ?? true,
       excludeAgents: strArray(captureGroup, "excludeAgents") ?? [],
@@ -636,6 +706,23 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       };
     })(),
     offload,
+    tips: {
+      enabled: bool(tipsGroup, "enabled") ?? true,
+      reminderEnabled: bool(tipsGroup, "reminderEnabled") ?? true,
+      maxReminderPerTask: Math.max(0, Math.floor(num(tipsGroup, "maxReminderPerTask") ?? 2)),
+      reminderCooldownSeconds: Math.max(0, Math.floor(num(tipsGroup, "reminderCooldownSeconds") ?? 1800)),
+      submitPath: str(tipsGroup, "submitPath") ?? "/memory-bridge/v3/tips/submit",
+    },
+    projectMemory: {
+      enabled: bool(projectMemoryGroup, "enabled") ?? false,
+      minPendingTips: Math.max(1, Math.floor(num(projectMemoryGroup, "minPendingTips") ?? 3)),
+      minDistinctSessions: Math.max(1, Math.floor(num(projectMemoryGroup, "minDistinctSessions") ?? 2)),
+      packagerMinIntervalSeconds: Math.max(0, Math.floor(num(projectMemoryGroup, "packagerMinIntervalSeconds") ?? 1800)),
+      packagerMaxIntervalSeconds: Math.max(0, Math.floor(num(projectMemoryGroup, "packagerMaxIntervalSeconds") ?? 14400)),
+      maxTopics: Math.max(1, Math.floor(num(projectMemoryGroup, "maxTopics") ?? 15)),
+      indexMaxChars: Math.max(1000, Math.floor(num(projectMemoryGroup, "indexMaxChars") ?? 6000)),
+      topicMaxChars: Math.max(1000, Math.floor(num(projectMemoryGroup, "topicMaxChars") ?? 4000)),
+    },
     // Skill: passthrough — let the host wiring call resolveSkillConfig() with
     // ambient probes (TCVDB / COS / embedding / LLMRunner). We don't apply
     // defaults here so the resolver remains the single source of truth.
@@ -663,6 +750,10 @@ function str(src: Record<string, unknown>, key: string): string | undefined {
 function normalizePromptMode(value: string | undefined, fallback: MemoryPromptMode = "chat"): MemoryPromptMode {
   if (value === "code" || value === "chat") return value;
   return fallback;
+}
+
+function normalizeCodeMemoryVersion(value: string | undefined): CodeMemoryVersion {
+  return value === "v2" ? "v2" : "v1";
 }
 
 function optStr(src: Record<string, unknown>, key: string): string | undefined {

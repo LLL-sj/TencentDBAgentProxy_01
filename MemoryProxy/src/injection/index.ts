@@ -77,6 +77,7 @@ export { TdaiL1RecallInjector } from "./injectors/tdai-l1-recall-injector.js";
 export { TdaiProfileMemoryInjector } from "./injectors/tdai-profile-memory-injector.js";
 export { TdaiToolsInjector } from "./injectors/tdai-tools-injector.js";
 export { KnowledgeToolsInjector } from "./injectors/knowledge-tools-injector.js";
+export { NoteToolsInjector, renderNoteToolsBlock } from "./injectors/note-tools-injector.js";
 export { AssetReflectionInjector, renderAssetReflectionBlock } from "./injectors/asset-reflection-injector.js";
 
 // CodeBuddy
@@ -101,6 +102,11 @@ import { SkillToolsInjector } from "./injectors/skill-tools-injector.js";
 import { TdaiProfileMemoryInjector } from "./injectors/tdai-profile-memory-injector.js";
 import { TdaiToolsInjector } from "./injectors/tdai-tools-injector.js";
 import { KnowledgeToolsInjector } from "./injectors/knowledge-tools-injector.js";
+import { NoteToolsInjector } from "./injectors/note-tools-injector.js";
+import {
+  SummaryTipsContractInjector,
+  SummaryTipsReminderInjector,
+} from "./injectors/summary-tips-contract-injector.js";
 import { AssetReflectionInjector } from "./injectors/asset-reflection-injector.js";
 import type { ProtocolAdapter } from "./adapters/interface.js";
 import type { AgentProfile } from "./agents/interface.js";
@@ -215,7 +221,7 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
   //
   // 未配时 fallback 到本机 host:port（仅单节点 / 本地开发场景可用），启动时 warn 一次。
   let proxyBaseUrl: string | undefined;
-  if (injectors.includes("skill") || (injectors.includes("tdai-memory") && config.tdai.enabled)) {
+  if (injectors.includes("skill") || injectors.includes("notes") || injectors.includes("summary-tips") || (injectors.includes("tdai-memory") && config.tdai.enabled)) {
     const externalBase = config.injection?.externalGatewayUrl;
     if (externalBase && externalBase.length > 0) {
       proxyBaseUrl = externalBase.replace(/\/$/, "");
@@ -272,6 +278,37 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
         coreSkill: config.knowledge,
       }));
     }
+
+  if (injectors.includes("notes")) {
+    // Team Notes static tool block. Only registered when knowledge endpoint
+    // is configured; otherwise the bridge would 503 and the block is noise.
+    if (config.knowledge?.enabled && config.knowledge.endpoint && proxyBaseUrl) {
+      registry.register(new NoteToolsInjector({
+        proxyBaseUrl,
+        allowLlmWrite: config.knowledge?.allowLlmWrite ?? false,
+      }));
+    }
+  }
+
+  if (injectors.includes("summary-tips") && proxyBaseUrl) {
+    // L0.5 task-summary contract. Static system contract + dynamic user reminder.
+    const tipsInjectorConfig = {
+      proxyBaseUrl,
+      submitPath: "/memory-bridge/v3/tips/submit",
+      enabled: config.tips.enabled,
+      reminderEnabled: config.tips.reminderEnabled,
+      maxReminderPerTask: config.tips.maxReminderPerTask,
+      reminderCooldownSeconds: config.tips.reminderCooldownSeconds,
+      firstUserReminder: config.tips.firstUserReminder,
+      count1Threshold: config.tips.count1Threshold,
+      count2Threshold: config.tips.count2Threshold,
+      timeReminderSeconds: config.tips.timeReminderSeconds,
+      sessionTtlSeconds: config.tips.sessionTtlSeconds,
+      defaultMode: config.tdai.memory.promptMode,
+    };
+    registry.register(new SummaryTipsContractInjector(tipsInjectorConfig));
+    registry.register(new SummaryTipsReminderInjector(tipsInjectorConfig));
+  }
   }
 
   if (injectors.includes("tdai-memory") && config.tdai.enabled && config.tdai.memory.enabled && config.tdai.memory.inject) {
@@ -284,6 +321,8 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
       endpoint: config.tdai.endpoint,
       apiKey: config.tdai.apiKey,
       serviceId: config.tdai.serviceId,
+      promptMode: config.tdai.memory.promptMode,
+      codeMemoryVersion: config.tdai.memory.codeMemoryVersion,
       writeL0: config.tdai.memory.writeL0,
       recallL1: config.tdai.memory.recallL1,
       injectL2L3: config.tdai.memory.injectL2L3,
@@ -294,7 +333,7 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
     // fixed-asset-agents（self + 借入≤2）通过内核 MetadataClient 获取；
     // 内核不可达时 injector 自动降级为"只查当前 agent 的记忆"。
     if (config.tdai.memory.injectL2L3) {
-      registry.register(new TdaiProfileMemoryInjector(tdaiBaseConfig, config.coreSkill));
+      registry.register(new TdaiProfileMemoryInjector(tdaiBaseConfig, config.coreSkill, proxyBaseUrl));
     }
     // 注意：L0/L1 不再每轮自动召回注入到 user prompt（会破坏 KV/prompt cache）。
     // 改为只在 system prompt 暴露只读工具（见 TdaiToolsInjector），借助 system
@@ -303,7 +342,10 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
     // <proxy>/memory-bridge/v3/* 调用只读工具。proxy 自动注入身份。
     // proxyBaseUrl 复用 skill-tools-injector 算出来的（同一 host:port）。
     if (typeof proxyBaseUrl !== "undefined") {
-      registry.register(new TdaiToolsInjector({ proxyBaseUrl }));
+      registry.register(new TdaiToolsInjector({
+        proxyBaseUrl,
+        promptMode: config.tdai.memory.promptMode,
+      }));
     }
   }
 

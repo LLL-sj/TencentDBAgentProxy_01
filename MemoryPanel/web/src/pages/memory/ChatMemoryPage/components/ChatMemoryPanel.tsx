@@ -222,7 +222,7 @@ export default function ChatMemoryPanel(
       if (selected.layerCounts[l] !== undefined) return;
 
       chatMemoryApi
-        .layer(blockId, l, 1, 0)
+        .layer(blockId, l, 1, 0, undefined, undefined, l === 'L1' ? 'chat' : undefined)
         .then((res) => {
           if (seq !== layerCountSeqRef.current) return; // 已被后续选中取代
           setBlocks((prev) =>
@@ -247,7 +247,7 @@ export default function ChatMemoryPanel(
     let cancelled = false;
     setLayerLoading(true);
     chatMemoryApi
-      .layer(selected.id, layer, pageSize, layerPage * pageSize)
+      .layer(selected.id, layer, pageSize, layerPage * pageSize, undefined, undefined, layer === 'L1' ? 'chat' : undefined)
       .then((res) => {
         if (cancelled) return;
         setBlocks((prev) =>

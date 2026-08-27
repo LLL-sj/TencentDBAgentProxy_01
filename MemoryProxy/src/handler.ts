@@ -43,6 +43,7 @@ import { deriveTdaiIdentity } from "./tdai/identity.js";
 import { extractLatestUserMessage, recordTdaiTurn } from "./tdai/recorder.js";
 import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
+import { readRequestMemoryMode, resolveEffectiveMemoryMode, type MemoryCaptureMode } from "./tdai/memory-mode.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
 import {
@@ -57,13 +58,16 @@ import {
  * land on the correct kernel tenant. Falls back to config when the request
  * carries no spaceId (older single-tenant deployments).
  */
-function createTdaiClient(config: ProxyConfig, spaceId?: string): TdaiClient | null {
+function createTdaiClient(config: ProxyConfig, spaceId?: string, memoryMode?: MemoryCaptureMode): TdaiClient | null {
   if (!config.tdai.enabled || !config.tdai.memory.enabled || !config.tdai.endpoint) return null;
   return new TdaiClient({
     enabled: config.tdai.enabled && config.tdai.memory.enabled,
     endpoint: config.tdai.endpoint,
     apiKey: config.tdai.apiKey,
     serviceId: spaceId || config.tdai.serviceId,
+    promptMode: config.tdai.memory.promptMode,
+    memoryMode,
+    codeMemoryVersion: config.tdai.memory.codeMemoryVersion,
     writeL0: config.tdai.memory.writeL0,
     recallL1: config.tdai.memory.recallL1,
     injectL2L3: config.tdai.memory.injectL2L3,
@@ -200,6 +204,7 @@ const SKIP_REQUEST_HEADERS = new Set([
   "content-length",
   "transfer-encoding",
   "connection",
+  "x-tdai-memory-mode",
 ]);
 
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -223,6 +228,11 @@ export function extractSseUsage(sseText: string): Record<string, unknown> | null
       const evt = JSON.parse(dataStr) as Record<string, unknown>;
       if (evt.usage && typeof evt.usage === "object") {
         lastUsage = evt.usage as Record<string, unknown>;
+      } else if (evt.response && typeof evt.response === "object") {
+        const resp = evt.response as Record<string, unknown>;
+        if (resp.usage && typeof resp.usage === "object") {
+          lastUsage = resp.usage as Record<string, unknown>;
+        }
       }
     } catch {
       // ignore malformed SSE lines
@@ -418,6 +428,249 @@ async function forwardWithRetry(
   return { resp: upstreamResp, retried: false };
 }
 
+/**
+ * Normalize OpenAI Chat Completions tools before forwarding.
+ *
+ * Some clients (notably Codex CLI) occasionally emit flat tools such as
+ * `{type:"function", name:"...", description:"...", parameters:{...}}` or
+ * custom-tool objects without the required `function.name`. The upstream
+ * OpenAI-compatible gateway rejects them with errors like
+ * `Missing required parameter: 'tools[7].name'`. We repair the flat form and
+ * drop entries that have no usable name at all, logging each removal so the
+ * source client can be diagnosed.
+ */
+function normalizeOpenAITools(
+  tools: unknown,
+): { tools: unknown[] | undefined; removed: number; wrapped: number } {
+  if (!Array.isArray(tools)) return { tools: tools as unknown[] | undefined, removed: 0, wrapped: 0 };
+  const normalized: Record<string, unknown>[] = [];
+  let removed = 0;
+  let wrapped = 0;
+
+  for (let i = 0; i < tools.length; i++) {
+    const raw = tools[i];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      removed++;
+      console.warn(`[openai-tools] removed invalid tool at index=${i}: not an object`);
+      continue;
+    }
+
+    const tool = { ...(raw as Record<string, unknown>) };
+    const fn = (tool.function && typeof tool.function === "object" && !Array.isArray(tool.function))
+      ? tool.function as Record<string, unknown>
+      : undefined;
+    const functionName = typeof fn?.name === "string" ? fn.name.trim() : "";
+    const flatName = typeof tool.name === "string" ? tool.name.trim() : "";
+    const name = functionName || flatName;
+
+    if (!name) {
+      removed++;
+      console.warn(
+        `[openai-tools] removed tool without function.name at index=${i}: ${JSON.stringify({ type: tool.type, name: tool.name, description: tool.description })}`,
+      );
+      continue;
+    }
+
+    if (!functionName) {
+      tool.type = "function";
+      tool.function = {
+        name,
+        description: typeof tool.description === "string" ? tool.description : "",
+        parameters:
+          tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters)
+            ? tool.parameters
+            : { type: "object", properties: {} },
+      };
+      delete tool.name;
+      delete tool.description;
+      delete tool.parameters;
+      wrapped++;
+      console.warn(`[openai-tools] wrapped flat tool at index=${i} name=${name}`);
+    }
+
+    normalized.push(tool);
+  }
+
+  return { tools: normalized, removed, wrapped };
+}
+
+/** True when the request path targets the OpenAI Responses API. */
+function isResponsesApiRequest(requestPath: string): boolean {
+  return matchWhitelistEndpoint(requestPath)?.pathSuffix === "/v1/responses";
+}
+
+/** Extract the plain-text body of a Responses API input item. */
+function responsesItemText(item: Record<string, unknown>): string {
+  const content = item.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const p = part as Record<string, unknown>;
+      if (p.type === "input_text" || p.type === "output_text" || p.type === "text" || p.type === "refusal") {
+        return typeof p.text === "string" ? p.text : "";
+      }
+      return "";
+    })
+    .join("");
+}
+
+/**
+ * Build a Chat-Completions-shaped `messages[]` view of a Responses API body.
+ * Used only for local session-init / injection / turn-counting; the original
+ * `input` array is preserved separately and restored before forwarding.
+ */
+function responsesBodyToMessages(body: Record<string, unknown>): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [];
+  const instructions = body.instructions;
+  if (typeof instructions === "string" && instructions.trim()) {
+    messages.push({ role: "system", content: instructions });
+  }
+
+  const input = body.input;
+  if (Array.isArray(input)) {
+    for (const raw of input) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const item = raw as Record<string, unknown>;
+      if (item.type === "message") {
+        const role = item.role;
+        if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") continue;
+        const text = responsesItemText(item);
+        messages.push({
+          role: role === "developer" ? "system" : role,
+          content: text || null,
+        });
+      } else if (item.type === "function_call") {
+        // Keep the view lightweight: hooks only need system/user text. Preserve
+        // the original function_call item in `input` for the upstream request.
+      } else if (item.type === "function_call_output") {
+        // Same as above; not a real user turn.
+      }
+    }
+  }
+
+  return messages;
+}
+
+/** Find the last user message in a synthetic messages[] and return its text. */
+function lastUserTextFromMessages(messages: unknown[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as Record<string, unknown>;
+    if (m.role !== "user") continue;
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) {
+      return (m.content as Record<string, unknown>[])
+        .filter((b) => b.type === "text")
+        .map((b) => (typeof b.text === "string" ? b.text : ""))
+        .join("\n");
+    }
+    return "";
+  }
+  return "";
+}
+
+/**
+ * Merge injection results back into the original Responses API body.
+ *
+ * The injection pipeline runs against a synthetic `messages[]` view. This
+ * function moves injected system text into `instructions` and prepended user
+ * reminders into a separate user input item, then removes the synthetic
+ * `messages` field so the upstream receives a valid Responses request.
+ */
+function mergeResponsesBodyAfterInjection(
+  originalBody: Record<string, unknown>,
+  processedBody: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...originalBody };
+  delete result.messages;
+
+  const originalMessages = responsesBodyToMessages(originalBody);
+  const processedMessages = Array.isArray(processedBody.messages)
+    ? (processedBody.messages as Record<string, unknown>[])
+    : [];
+
+  const originalSystemText = originalMessages
+    .filter((m) => m.role === "system" && typeof m.content === "string")
+    .map((m) => m.content as string)
+    .join("\n");
+  const processedSystemText = processedMessages
+    .filter((m) => m.role === "system" && typeof m.content === "string")
+    .map((m) => m.content as string)
+    .join("\n");
+
+  if (processedSystemText && processedSystemText !== originalSystemText) {
+    result.instructions = processedSystemText;
+  }
+
+  const originalUserText = lastUserTextFromMessages(originalMessages);
+  const processedUserText = lastUserTextFromMessages(processedMessages);
+  if (originalUserText && processedUserText !== originalUserText) {
+    let reminder = "";
+    if (processedUserText.endsWith(originalUserText)) {
+      reminder = processedUserText.slice(0, processedUserText.length - originalUserText.length);
+    } else {
+      const idx = processedUserText.lastIndexOf(originalUserText);
+      if (idx > 0) reminder = processedUserText.slice(0, idx);
+    }
+    reminder = reminder.trim();
+    if (reminder) {
+      const input = Array.isArray(result.input) ? [...(result.input as unknown[])] : [];
+      let insertAt = input.length;
+      for (let i = input.length - 1; i >= 0; i--) {
+        const item = input[i] as Record<string, unknown>;
+        if (item?.type === "message" && item?.role === "user") {
+          insertAt = i;
+          break;
+        }
+      }
+      input.splice(insertAt, 0, {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: reminder }],
+      });
+      result.input = input;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Normalize Responses API tools. Unlike Chat Completions, the Responses API
+ * expects the flat `{type,name,description,parameters}` shape; only remove
+ * entries that have no usable name.
+ */
+function normalizeResponsesTools(
+  tools: unknown,
+): { tools: unknown[] | undefined; removed: number; kept: number } {
+  if (!Array.isArray(tools)) return { tools: tools as unknown[] | undefined, removed: 0, kept: 0 };
+  const normalized: Record<string, unknown>[] = [];
+  let removed = 0;
+
+  for (let i = 0; i < tools.length; i++) {
+    const raw = tools[i];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      removed++;
+      console.warn(`[openai-tools] responses removed invalid tool at index=${i}: not an object`);
+      continue;
+    }
+    const tool = raw as Record<string, unknown>;
+    const name = typeof tool.name === "string" ? tool.name.trim() : "";
+    if (!name) {
+      removed++;
+      console.warn(
+        `[openai-tools] responses removed tool without name at index=${i}: ${JSON.stringify({ type: tool.type, description: tool.description })}`,
+      );
+      continue;
+    }
+    normalized.push(tool);
+  }
+
+  return { tools: normalized, removed, kept: normalized.length };
+}
+
 /** Main handler for POST /v1/chat/completions (OpenAI compat). */
 export async function handleChatCompletions(
   c: Context,
@@ -458,7 +711,8 @@ export async function handleChatCompletions(
   // 内部/外部用户一视同仁 —— internal callers must also request by
   // `modelName`, ensuring upstream ids and billing/observability keys align
   // across all traffic.
-  const requestedModel = typeof body.model === "string" ? body.model : "unknown";
+  const requestedModel = typeof body.model === "string" ? body.model : (config.upstream.defaultModel || "unknown");
+  if (typeof body.model !== "string") body.model = requestedModel;
   if (!isModelInPricing(config.creditPricing, requestedModel)) {
     return c.json(
       {
@@ -496,6 +750,21 @@ export async function handleChatCompletions(
     if (sysMatch) {
       return handleSystemUserPassthrough(c, config, sysMatch, body);
     }
+  }
+
+  const isResponsesApi = isResponsesApiRequest(c.req.path);
+  let responsesOriginalBody: Record<string, unknown> | null = null;
+  if (isResponsesApi) {
+    responsesOriginalBody = body;
+    const responsesViewBody: Record<string, unknown> = { ...body };
+    delete responsesViewBody.input;
+    responsesViewBody.messages = responsesBodyToMessages(body);
+    body = responsesViewBody;
+    console.log(
+      `[openai-responses] prepare session/injection view requestPath=${c.req.path} ` +
+      `inputItems=${Array.isArray(responsesOriginalBody.input) ? responsesOriginalBody.input.length : 0} ` +
+      `syntheticMessages=${(responsesViewBody.messages as unknown[]).length}`,
+    );
   }
 
   let messages = Array.isArray(body.messages) ? body.messages : [];
@@ -545,6 +814,12 @@ export async function handleChatCompletions(
   const { resolveConversationId } = await import("./session/session-key.js");
   const conversationId = resolveConversationId(c);
   const sessionKey = conversationId ?? resolveSessionKey(config, lcHeaders, c.req.path, body, keyId);
+
+  // ── Per-request memory capture mode header ─────────────────────────────
+  // Header wins for the current request; a session already carrying a frozen
+  // mode ignores later header changes (session freeze semantics).
+  const requestMemoryMode = readRequestMemoryMode(c);
+  let memoryMode: MemoryCaptureMode = config.tdai.memory.promptMode;
 
   // ── Auth verification (user_key → user_id) ──────────────────────────────────────
   // Reuse the early verify result — it ran before body parse to decide the
@@ -607,7 +882,9 @@ export async function handleChatCompletions(
       // L2b recovery 分支 justRegistered=true 只是 prewarm 信号，走 recovered 分支时
       // wentThroughSessionInitStateMachine=false 会自然过滤掉，不进 sessionJustRegistered。
       let wentThroughSessionInitStateMachine = false;
-      if (recovered && isTerminalState) {
+      const isOneShotBypass = recovered?.bypassed && !recovered?.sessionInfo && !recovered?.agentDetail;
+      const needsHeaderAutoSelect = isOneShotBypass && presetIdentity;
+      if (recovered && isTerminalState && !needsHeaderAutoSelect) {
         // Recovery hit: keep original messages, only re-inject <session_context>
         // so this turn's system message carries agent/task context again.
         // 用户对话永远保留原样，包括 session_init form 交互 — 不做任何删除。
@@ -693,6 +970,29 @@ export async function handleChatCompletions(
         spaceId,
       );
 
+      // Freeze memory mode: first header on this session wins; later requests
+      // without the header reuse sessionInfo.memory_mode. No header and no
+      // stored mode falls back to config.tdai.memory.promptMode.
+      memoryMode = resolveEffectiveMemoryMode(
+        requestMemoryMode,
+        (initResult.sessionInfo as { memory_mode?: string } | null | undefined)?.memory_mode,
+        config.tdai.memory.promptMode,
+      );
+      if (memoryMode === "all" && config.tdai.memory.codeMemoryVersion !== "v2") {
+        return c.json(
+          { error: { message: "memory mode 'all' requires codeMemoryVersion=v2", type: "invalid_request_error", code: "invalid_memory_mode" } },
+          400,
+        );
+      }
+      if (initResult.sessionInfo) {
+        (initResult.sessionInfo as unknown as Record<string, unknown>).memory_mode = memoryMode;
+        try {
+          await store.freezeMemoryMode(compositeKey, memoryMode);
+        } catch (err) {
+          console.warn("[memory-mode] freeze failed:", err instanceof Error ? err.message : String(err));
+        }
+      }
+
       // Case 2 success → await prewarm so the first-turn pipeline always
       // hits the cache. A fire-and-forget void() here caused the bug where
       // the pipeline ran before the cache was populated, silently injecting
@@ -710,6 +1010,7 @@ export async function handleChatCompletions(
             keyId: sessionKey,
             userId: userId || "anonymous",
             agentSource,
+            spaceId: spaceId || undefined,
             sessionInfo: initResult.sessionInfo as import("./session/types.js").SessionInfo,
             agentDetail: initResult.agentDetail ?? null,
             taskDetail: initResult.taskDetail ?? null,
@@ -745,6 +1046,20 @@ export async function handleChatCompletions(
       sessionInfo = undefined;
       injectedSkipped = true;
     }
+  }
+
+  if (!config.sessionInit?.enabled || !conversationId) {
+    memoryMode = resolveEffectiveMemoryMode(
+      requestMemoryMode,
+      undefined,
+      config.tdai.memory.promptMode,
+    );
+  }
+  if (memoryMode === "all" && config.tdai.memory.codeMemoryVersion !== "v2") {
+    return c.json(
+      { error: { message: "memory mode 'all' requires codeMemoryVersion=v2", type: "invalid_request_error", code: "invalid_memory_mode" } },
+      400,
+    );
   }
 
   // ── mem: command intercept ────────────────────────────────────────────────
@@ -799,7 +1114,7 @@ export async function handleChatCompletions(
 
       // L0 写入 — 同步 await 保证落盘再返回（跟主对话路径的 trackWrite/withL0Retry
       // 兜底不同，这里 mem 命令是"仅这一次"路径，必须显式等）。
-      const tdaiClientForMem = createTdaiClient(config, spaceId);
+      const tdaiClientForMem = memoryMode === "none" ? null : createTdaiClient(config, spaceId, memoryMode);
       const tdaiIdentityForMem = deriveTdaiIdentity({
         sessionInfo: sessionInfo as Record<string, unknown> | null | undefined,
         userId: userId || null,
@@ -841,7 +1156,7 @@ export async function handleChatCompletions(
     }
   }
 
-  const tdaiClient = assetCapabilities?.chat_memory === false ? null : createTdaiClient(config, spaceId);
+  const tdaiClient = memoryMode === "none" || assetCapabilities?.chat_memory === false ? null : createTdaiClient(config, spaceId, memoryMode);
   const tdaiIdentity = injectedSkipped
     ? null
     : deriveTdaiIdentity({
@@ -849,7 +1164,7 @@ export async function handleChatCompletions(
         userId: userId || null,
         sessionKey,
       });
-  const tdaiUserMessage = extractLatestUserMessage(messages);
+  const tdaiUserMessage = extractLatestUserMessage(messages, agentSource, config.codexInternal.promptPrefixes);
 
   // ── Context injection (before cost guard) ──────────────────────────────
   if (!injectedSkipped && config.injection?.enabled && config.injection.injectors.length > 0) {
@@ -876,13 +1191,50 @@ export async function handleChatCompletions(
               session: sessionInfo,
               assetCapabilities,
               userKey: apiKey || undefined,
+              memoryMode,
             }
-          : undefined,
+          : { memoryMode },
       });
       body = injectedBody;
       messages = Array.isArray(injectedBody.messages) ? injectedBody.messages : messages;
     } catch (err: unknown) {
       // Injection failure is non-fatal — fall back to original body
+    }
+  }
+
+  if (isResponsesApi && responsesOriginalBody) {
+    body = mergeResponsesBodyAfterInjection(responsesOriginalBody, body);
+    console.log(
+      `[openai-responses] restore responses body session=${sessionKey} hasInput=${Array.isArray(body.input)} ` +
+      `hasMessages=${Array.isArray(body.messages)} instructionsLen=${typeof body.instructions === "string" ? body.instructions.length : 0}`,
+    );
+  }
+
+  if (body.tools !== undefined) {
+    if (isResponsesApi) {
+      const normalizedTools = normalizeResponsesTools(body.tools);
+      if (normalizedTools.removed > 0) {
+        console.warn(
+          `[openai-tools] session=${sessionKey} responses removed=${normalizedTools.removed} kept=${normalizedTools.kept}`,
+        );
+      }
+      if (Array.isArray(body.tools) && normalizedTools.tools && normalizedTools.tools.length === 0) {
+        delete body.tools;
+      } else {
+        body.tools = normalizedTools.tools;
+      }
+    } else {
+      const normalizedTools = normalizeOpenAITools(body.tools);
+      if (normalizedTools.removed > 0 || normalizedTools.wrapped > 0) {
+        console.warn(
+          `[openai-tools] session=${sessionKey} removed=${normalizedTools.removed} wrapped=${normalizedTools.wrapped} finalCount=${normalizedTools.tools?.length ?? 0}`,
+        );
+      }
+      if (Array.isArray(body.tools) && normalizedTools.tools && normalizedTools.tools.length === 0) {
+        delete body.tools;
+      } else {
+        body.tools = normalizedTools.tools;
+      }
     }
   }
 
@@ -1143,8 +1495,85 @@ export async function handleChatCompletions(
       langfuseDebug,
       debugMetadata,
     };
-    const passthrough = createUsageTapTransform(tapCtx);
-    const tappedStream = upstreamResp.body.pipeThrough(passthrough);
+    // Manual ReadableStream replaces TransformStream — Node.js flush() bug (#19)
+    const usReader = upstreamResp.body.getReader();
+    const usDecoder = new TextDecoder();
+    let usSseBuf = "";
+    let usLastUsage: Record<string, unknown> | null = null;
+    let usAssistantContent = "";
+    const usToolAcc = new Map<number, ToolCallAccumulator>();
+
+    const tappedStream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        let readDone = false;
+        let readValue: Uint8Array | undefined;
+        try {
+          const read = await usReader.read();
+          readDone = read.done;
+          readValue = read.value;
+        } catch (err) {
+          console.error(
+            `[openai-stream] upstream read error session=${sessionKey} ` +
+            `error=${err instanceof Error ? err.message : String(err)}`,
+          );
+          try {
+            await finalizeStreamTap(tapCtx, usLastUsage, usAssistantContent, usToolAcc);
+          } catch (finalizeErr) {
+            console.error(
+              `[openai-stream] finalize after read error failed session=${sessionKey} ` +
+              `error=${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`,
+            );
+          }
+          controller.error(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+
+        if (readDone) {
+          if (usSseBuf.trim()) {
+            const u = extractSseUsage(usSseBuf);
+            if (u) usLastUsage = u;
+            const { content, toolCallDeltas } = extractSseContentAndTools(usSseBuf);
+            usAssistantContent += content;
+            mergeToolCallDeltas(usToolAcc, toolCallDeltas);
+          }
+          try {
+            await finalizeStreamTap(tapCtx, usLastUsage, usAssistantContent, usToolAcc);
+          } catch (finalizeErr) {
+            // Finalization is observability/L0 bookkeeping; never break the
+            // already-complete SSE stream because of it.
+            console.error(
+              `[openai-stream] finalize failed session=${sessionKey} ` +
+              `error=${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`,
+            );
+          }
+          controller.close();
+          return;
+        }
+
+        const value = readValue!;
+        const chunk = usDecoder.decode(value, { stream: true });
+        usSseBuf += chunk;
+        const parts = usSseBuf.split("\n\n");
+        usSseBuf = parts.pop() ?? "";
+        for (const part of parts) {
+          const u = extractSseUsage(part);
+          if (u) usLastUsage = u;
+          const { content, toolCallDeltas } = extractSseContentAndTools(part);
+          usAssistantContent += content;
+          mergeToolCallDeltas(usToolAcc, toolCallDeltas);
+        }
+        controller.enqueue(value);
+      },
+      cancel(reason) {
+        console.log(
+          `[openai-stream] client cancel session=${sessionKey} ` +
+          `reason=${reason === undefined ? "undefined" : String(reason)}`,
+        );
+        void usReader.cancel(reason).catch(() => {
+          // best-effort upstream cancellation
+        });
+      },
+    });
 
     return new Response(tappedStream, { status: upstreamResp.status, headers: respHeaders });
   }
@@ -1216,6 +1645,13 @@ export async function handleChatCompletions(
     }
 
     if (tdaiClient && isExtractionAllowed(config, "tdai-memory")) {
+      if (agentSource === "codebuddy") {
+        try {
+          const ac = assistantContentForTdai(assistantMessage);
+          const trace2 = { ts: new Date().toISOString(), traceId, phase: "nonstream-l0", assistantExtract: ac ? { len: ac.length, p80: ac.substring(0, 80) } : null };
+          console.log("[TRACE] " + JSON.stringify(trace2));
+        } catch (_e) {}
+      }
       await recordTdaiTurn(tdaiClient, tdaiIdentity, tdaiUserMessage, assistantContentForTdai(assistantMessage));
     } else if (tdaiClient) {
       logExtractionSkipped(config, "tdai-memory", sessionKey);
@@ -1337,10 +1773,45 @@ export async function handleChatCompletions(
 }
 
 
+/**
+ * Strip Codex transcript artifacts from assistant content before L0 write.
+ *
+ * Codex approval flow injects transcript markers / approval JSON decisions
+ * into the assistant response stream. These are not conversational text and
+ * should not enter long-term memory.
+ *
+ * Stripped patterns:
+ *   - {"outcome":"allow"} / {"outcome":"deny"} (approval decisions)
+ *   - Standalone ASSISTANT / USER / SYSTEM transcript markers
+ *   - ISO timestamp lines (YYYY-MM-DD HH:MM)
+ *
+ * Does NOT strip JSON that's part of a larger message (e.g. "Here is
+ * your config: {"key":"value"}") — only pure single-line JSON objects
+ * with known approval keys.
+ */
+function stripTranscriptArtifacts(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return true; // keep blank lines
+      // Codex approval JSON decision
+      if (/^\{\s*"outcome"\s*:\s*"(?:allow|deny)"\s*\}$/.test(t)) return false;
+      // Standalone transcript role markers
+      if (/^\s*(?:ASSISTANT|USER|SYSTEM)\s*$/.test(t)) return false;
+      // Timestamp: YYYY-MM-DD HH:MM
+      if (/^\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*$/.test(t)) return false;
+      return true;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")  // collapse excessive blank lines
+    .trim();
+}
+
 function assistantContentForTdai(message: Record<string, unknown> | null): string | null {
   if (!message) return null;
   const content = message.content;
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return stripTranscriptArtifacts(content) || null;
   if (Array.isArray(content)) {
     return content.map((part) => {
       const p = part as Record<string, unknown>;
@@ -1419,6 +1890,19 @@ function extractSseContentAndTools(sseText: string): SseExtractResult {
     if (!dataStr || dataStr === "[DONE]") continue;
     try {
       const evt = JSON.parse(dataStr) as Record<string, unknown>;
+      // OpenAI Responses API streaming event (Codex wire_api=responses).
+      if (evt.type === "response.output_text.delta" && typeof evt.delta === "string") {
+        content += evt.delta;
+      }
+      if (evt.type === "response.function_call_arguments.delta" && typeof evt.delta === "string") {
+        const idx = typeof evt.output_index === "number" ? evt.output_index : 0;
+        toolCallDeltas.push({
+          index: idx,
+          id: typeof evt.item_id === "string" ? evt.item_id : undefined,
+          functionName: undefined,
+          functionArguments: evt.delta,
+        });
+      }
       const choices = evt.choices;
       if (Array.isArray(choices) && choices.length > 0) {
         const delta = (choices[0] as Record<string, unknown>).delta as Record<string, unknown> | undefined;
@@ -1469,6 +1953,221 @@ function mergeToolCallDeltas(
 /** Create a TransformStream that passes bytes through unchanged,
  *  while extracting usage/content/tool_calls from SSE events in-band.
  */
+/**
+ * Standalone stream finalization — extracts usage, writes L0, triggers
+ * skill extract, reports credit. Called explicitly when the manual
+ * ReadableStream reader signals done (Node.js TransformStream.flush()
+ * is unreliable for some upstreams — see #19).
+ */
+async function finalizeStreamTap(
+  ctx: TapContext,
+  lastUsage: Record<string, unknown> | null,
+  assistantContent: string,
+  toolCallAccumulators: Map<number, ToolCallAccumulator>,
+): Promise<void> {
+  const { config, modelId, keyId, sessionKey, upstreamUrl, traceId, forkTraceId, startTime, inputMessages, retried, logMeta, pipe, lf, spaceId, upstreamRequestId } = ctx;
+
+  const endTime = new Date().toISOString();
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ⚠️ 两条数据流，两种内容需求：
+  //
+  //   outputMessage (本段组装) → Opik / Langfuse 外部可观测性
+  //     需要完整的 assistant 响应，含 tool_call JSON，方便调试和审计。
+  //
+  //   assistantContent (上游参数) → L0 记忆录音
+  //     只需要纯文本，tool_call 是噪音，不应写入长期记忆。
+  //
+  //   assistantContent 来自 SSE delta.content 累加（文本），
+  //   toolCallAccumulators 来自 SSE delta.tool_calls 累加（工具调用）。
+  //   两者在 extractSseContentAndTools() 中已分离，这里组装 outputMessage
+  //   时重新合并，是给 Opik/Langfuse 看的完整快照。L0 写入点（本函数下方）
+  //   直接取 assistantContent，不走 outputMessage，避免 tool 信息污染记忆。
+  // ═══════════════════════════════════════════════════════════════════════
+  let outputMessage: Record<string, unknown> | null = null;
+  if (assistantContent || toolCallAccumulators.size > 0) {
+    if (toolCallAccumulators.size > 0) {
+      const toolCallEntries = Array.from(toolCallAccumulators.entries())
+        .sort(([a], [b]) => a - b)
+        .map(([, acc]) => JSON.stringify({ tool_call_id: acc.id, tool_name: acc.functionName, arguments: acc.functionArguments }, null, 2))
+        .join("\n\n");
+      const parts: string[] = [];
+      if (assistantContent) parts.push(assistantContent);
+      parts.push(toolCallEntries);
+      outputMessage = { role: "assistant", content: parts.join("\n\n") };
+    } else {
+      outputMessage = { role: "assistant", content: assistantContent };
+    }
+  }
+
+  if (lastUsage) {
+    await recordInputTokenUsage({
+      config,
+      instanceId: spaceId || undefined,
+      modelId,
+      usage: lastUsage,
+      protocol: "openai",
+    });
+    try {
+      writeLog(config, {
+        timestamp: endTime,
+        event: "usage",
+        modelId,
+        keyId,
+        sessionKey,
+        turnSeq: lf.turnSeq,
+        userInput: lf.userQuery || undefined,
+        upstreamUrl,
+        stream: true,
+        usage: lastUsage,
+        spaceId,
+        upstreamRequestId,
+      });
+    } catch (logErr: unknown) {
+      pipe.error("LOG_WRITE", logErr);
+    }
+
+    try {
+      const outputMessages = outputMessage ? [outputMessage] : [];
+      opikUpdateTrace(config, {
+        traceId,
+        projectName: keyId,
+        endTime,
+        output: outputMessages,
+        usage: lastUsage,
+      });
+      if (ctx.forkTraceId && !config.opik.stripRequestLogContent) {
+        opikUpdateTrace(config, {
+          traceId: ctx.forkTraceId,
+          projectName: "request_log",
+          endTime,
+          output: outputMessages,
+          usage: lastUsage,
+        });
+      }
+
+      opikCreateLlmSpan(config, {
+        traceId,
+        projectName: keyId,
+        name: modelId,
+        startTime,
+        endTime,
+        inputMessages,
+        outputMessage,
+        model: modelId,
+        usage: lastUsage,
+        tags: ["stream", ...(retried ? ["retry"] : [])],
+        forkProjectName: "request_log",
+        forkTraceId: ctx.forkTraceId,
+        forkMetadata: { keyId, modelId, stream: true, upstreamUrl },
+      });
+    } catch (opikErr: unknown) {
+      pipe.error("OPIK_SPAN", opikErr);
+    }
+
+    try {
+      const streamDebugExtra = ctx.langfuseDebug
+        ? {
+            stream_tool_call_count: toolCallAccumulators.size,
+            stream_assistant_content_len: assistantContent.length,
+          }
+        : {};
+      langfuseReportGeneration({
+        traceId: lf.traceId,
+        name: modelId,
+        model: modelId,
+        startTime,
+        endTime,
+        input: buildLangfuseInputChat(inputMessages, ctx.langfuseDebug, flattenMessagesForOpik),
+        output: outputMessage,
+        usage: lastUsage,
+        traceName: lf.traceName,
+        userId: lf.userId,
+        sessionId: lf.sessionId,
+        tags: lf.tags,
+        traceInput: lf.userQuery || undefined,
+        traceOutput: outputMessage ?? undefined,
+        traceMetadata: {
+          stream: true, retried, upstreamUrl, ...logMeta,
+          ...ctx.debugMetadata, ...streamDebugExtra,
+        },
+        observationMetadata: {
+          retried, ...logMeta,
+          ...ctx.debugMetadata, ...streamDebugExtra,
+        },
+      });
+    } catch (langfuseErr: unknown) {
+      pipe.error("LANGFUSE_SPAN", langfuseErr);
+    }
+  }
+
+  if (ctx.tdaiClient && isExtractionAllowed(ctx.config, "tdai-memory")) {
+    // ── L0 记忆写入（流式路径）────────────────────────────────────
+    // 为什么用 assistantContent 而不是 outputMessageContent(outputMessage)？
+    //
+    //   assistantContent  = SSE delta.content 累加 → 纯文本，不含 tool_call
+    //   outputMessage     = 上方组装的完整快照 → 文本 + 序列化的 tool_call JSON
+    //
+    //   如果走 outputMessageContent(outputMessage)，Codex 等上游把 tool_call
+    //   内联在 delta.content 里的场景会让 L0 被 {"tool_call_id":...,"arguments":...}
+    //   等 JSON 噪声污染。工具调用不是人类对话，不应进入长期记忆。
+    //
+    //   2026-08-12 修复：此前错误复用了 outputMessage，导致 七 节 L0 过滤对
+    //   Codex 失效。此处的 outputMessage 只服务于 Opik/Langfuse（见上方注释）。
+    trackWrite(
+      withL0Retry(() => recordTdaiTurn(
+        ctx.tdaiClient!, ctx.tdaiIdentity, ctx.tdaiUserMessage,
+        assistantContent ? stripTranscriptArtifacts(assistantContent) || null : null,
+      )).catch((err: unknown) => pipe.error("TDAI_L0", err))
+    );
+  } else if (ctx.tdaiClient) {
+    logExtractionSkipped(ctx.config, "tdai-memory", ctx.sessionKeyForSkill);
+  }
+
+  pipe.streamDone(lastUsage);
+
+  if (isExtractionAllowed(ctx.config, "skill")) {
+    await triggerSkillExtractIfReady({
+      config: ctx.config,
+      sessionKey: ctx.sessionKeyForSkill,
+      agentSource: ctx.agentSource,
+      sessionInfo: ctx.sessionInfo,
+      inputMessages: ctx.inputMessages,
+      assistantMessage: outputMessage,
+      protocol: "openai",
+      assetCapabilities: ctx.assetCapabilities,
+      toolCallCountOverride: toolCallAccumulators.size,
+    });
+  } else {
+    logExtractionSkipped(ctx.config, "skill", ctx.sessionKeyForSkill);
+  }
+
+  tryReportCreditFromPath(
+    ctx.config.creditReport,
+    ctx.requestPath,
+    lastUsage,
+    ctx.config.creditPricing,
+    ctx.modelId,
+    ctx.upstreamUrl,
+    "usage",
+  ).then((outcome) => {
+    if (outcome.attempted && !outcome.ok) {
+      pipe.error("CREDIT_REPORT", `[stream] ${outcome.errorMessage ?? "unknown"}`);
+      writeFailedReportRaw({
+        timestamp: new Date().toISOString(),
+        event: "usage",
+        modelId: ctx.modelId,
+        keyId: ctx.keyId,
+        spaceId: ctx.spaceId || undefined,
+        sessionKey: ctx.sessionKey,
+        upstreamUrl: ctx.upstreamUrl,
+        stream: true,
+        usage: lastUsage ?? undefined,
+      }, outcome.errorMessage ?? "unknown");
+    }
+  }).catch(() => {});
+}
+
 function createUsageTapTransform(ctx: TapContext): TransformStream<Uint8Array, Uint8Array> {
   const { config, modelId, keyId, sessionKey, upstreamUrl, traceId, forkTraceId, startTime, inputMessages, retried, logMeta, pipe, lf, spaceId, upstreamRequestId } = ctx;
 
@@ -1638,7 +2337,7 @@ function createUsageTapTransform(ctx: TapContext): TransformStream<Uint8Array, U
       trackWrite(
         withL0Retry(() => recordTdaiTurn(
           ctx.tdaiClient!, ctx.tdaiIdentity, ctx.tdaiUserMessage,
-          outputMessageContent(outputMessage),
+          assistantContent ? stripTranscriptArtifacts(assistantContent) || null : null,
         )).catch((err: unknown) => pipe.error("TDAI_L0", err))
       );
     } else if (ctx.tdaiClient) {

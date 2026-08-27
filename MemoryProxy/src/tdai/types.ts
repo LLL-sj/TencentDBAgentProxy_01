@@ -9,6 +9,13 @@ export interface TdaiMemoryConfig {
   /** x-tdai-service-id header value. */
   serviceId: string;
 
+  /** Config fallback for injected memory-tool guidance. */
+  promptMode: "chat" | "code" | "all" | "none";
+  /** Resolved per-request/per-session capture mode (header > frozen session > config). */
+  memoryMode?: "chat" | "code" | "all" | "none";
+  /** Mirrors MemoryCore memory.codeMemoryVersion. v2 switches L2/L3 injection to project/MEMORY.md. */
+  codeMemoryVersion: "v1" | "v2";
+
   writeL0: boolean;
   recallL1: boolean;
   injectL2L3: boolean;
@@ -84,4 +91,29 @@ export interface TdaiL2File extends TdaiL2Entry {
 export interface TdaiL3Core {
   content: string;
   updatedAt?: string;
+}
+
+export interface TdaiProjectTopic {
+  path: string;
+  name?: string;
+  type?: string;
+  title: string;
+  tags?: string[];
+  sources?: string[];
+  updated?: string;
+  summary?: string;
+}
+
+export interface TdaiProjectFile extends TdaiProjectTopic {
+  content: string;
+}
+
+export interface TdaiProjectSearchHit {
+  path: string;
+  title: string;
+  type?: string;
+  tags?: string[];
+  summary?: string;
+  snippet?: string;
+  score?: number;
 }

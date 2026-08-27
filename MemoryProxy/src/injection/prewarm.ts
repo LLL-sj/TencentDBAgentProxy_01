@@ -79,6 +79,10 @@ export async function prewarmAll(
 ): Promise<PrewarmResult> {
   const startedAt = Date.now();
   const sessionId = input.sessionInfo.session_id;
+  // 必须与会话持久化（SessionRepo/BindingRepo）使用同一个 spaceId。
+  // handler 层若漏传，则从 sessionInfo.space_id 兜底；两者都缺省才落到 _default。
+  // 否则 hook_cache 的 FK 会指向不存在的 session_id（H-08 根因）。
+  const spaceId = input.spaceId ?? input.sessionInfo.space_id ?? "";
   const totalBudget = opts.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
   const cachedHookIds: string[] = [];
   const skipped: Array<{ hookId: string; reason: string }> = [];
@@ -157,7 +161,7 @@ export async function prewarmAll(
   }
 
   if (okEntries.length > 0) {
-    repo.putMany(input.spaceId ?? "", input.userId, input.agentSource, sessionId, okEntries);
+    repo.putMany(spaceId, input.userId, input.agentSource, sessionId, okEntries);
   }
 
   const durationMs = Date.now() - startedAt;

@@ -123,6 +123,71 @@ export const knowledgeCodeGraphAudit = sqliteTable(
   (table) => [index("idx_kcga_cg_version").on(table.codeGraphId, table.version)],
 );
 
+// ───────────────────────── team_notes ─────────────────────────
+// Lightweight team-shared markdown notes. Content is stored in SQLite; the
+// file representation is produced on-demand by /v3/notes/export.
+
+export const teamNotes = sqliteTable(
+  "team_notes",
+  {
+    noteId: text("note_id").primaryKey(),
+    serviceId: text("service_id").notNull(),
+    teamId: text("team_id").notNull(),
+    seqNo: integer("seq_no").notNull(),
+    title: text("title").notNull(),
+    filename: text("filename").notNull(),
+    contentMd: text("content_md").notNull(),
+    contentHash: text("content_hash").notNull(),
+    authorUserId: text("author_user_id").notNull(),
+    version: integer("version").notNull().default(1),
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_team_notes_team_seq").on(table.serviceId, table.teamId, table.seqNo),
+    index("idx_team_notes_team_status_created").on(
+      table.serviceId,
+      table.teamId,
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
+// ───────────────────────── team_note_tags ─────────────────────────
+
+export const teamNoteTags = sqliteTable(
+  "team_note_tags",
+  {
+    noteId: text("note_id").notNull(),
+    tagSlug: text("tag_slug").notNull(),
+    tagLabel: text("tag_label").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("idx_team_note_tags_note_slug").on(table.noteId, table.tagSlug),
+    index("idx_team_note_tags_slug_note").on(table.tagSlug, table.noteId),
+  ],
+);
+
+// ───────────────────────── team_note_revisions ─────────────────────────
+
+export const teamNoteRevisions = sqliteTable(
+  "team_note_revisions",
+  {
+    revisionId: text("revision_id").primaryKey(),
+    noteId: text("note_id").notNull(),
+    version: integer("version").notNull(),
+    title: text("title").notNull(),
+    contentMd: text("content_md").notNull(),
+    tagsJson: text("tags_json").notNull(),
+    editedBy: text("edited_by").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [index("idx_team_note_revisions_note_version").on(table.noteId, table.version)],
+);
+
 // ───────────────────────── llm_binding ─────────────────────────
 // Per-instance (service_id) LLM routing for wiki ingest/summary.
 // mode='proxy' → call context_proxy with a dedicated knowledge-service user_key;
@@ -144,6 +209,9 @@ export type KnowledgeCodeGraph = typeof knowledgeCodeGraph.$inferSelect;
 export type KnowledgeWiki = typeof knowledgeWiki.$inferSelect;
 export type KnowledgeWikiAudit = typeof knowledgeWikiAudit.$inferSelect;
 export type KnowledgeCodeGraphAudit = typeof knowledgeCodeGraphAudit.$inferSelect;
+export type TeamNote = typeof teamNotes.$inferSelect;
+export type TeamNoteTag = typeof teamNoteTags.$inferSelect;
+export type TeamNoteRevision = typeof teamNoteRevisions.$inferSelect;
 export type LlmBinding = typeof llmBinding.$inferSelect;
 
 /** Data format version constants (reserved field). */

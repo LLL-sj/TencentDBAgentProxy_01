@@ -41,7 +41,7 @@ export const codebuddyAdapter: AgentAdapter = {
     return "main";
   },
 
-  extractUserText(content) {
+    extractUserText(content) {
     // CB content 从来都是字符串。若未来 CB 突然改成数组，走 default 兜底
     // （拼接所有 text block）不主动崩。
     if (typeof content !== "string") {

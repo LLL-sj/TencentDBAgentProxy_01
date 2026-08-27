@@ -105,6 +105,12 @@ export function resolvePresetIdentity(
   // 与 CC/CB completeRegistration 的守卫一致：缺 task 直接 bypass，不再"只注入
   // agent"；header 缺 task_id 时也不走 shortcut，回退到交互式流程（该流程内部
   // 的 auto-select 级联在 tasks.length===0 时也会 bypass）。
+  console.log(
+    `[preset-debug] preset={team:${preset.teamId}, agent:${preset.agentId}, task:${preset.taskId}} ` +
+    `resolved={team:${res.teamId}, agent:${res.agentId}, task:${res.taskId}} ` +
+    `teams=[${teams.map(t => `${t.team_id}(${t.agents.length}a,${t.tasks.length}t)`).join(',')}] ` +
+    `hadMismatch=${res.hadMismatch} canRegister=${!!res.agentId && !!res.taskId && !res.hadMismatch}`,
+  );
   res.canRegister = !!res.agentId && !!res.taskId && !res.hadMismatch;
   return res;
 }

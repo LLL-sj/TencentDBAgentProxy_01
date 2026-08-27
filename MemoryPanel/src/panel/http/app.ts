@@ -11,6 +11,9 @@ import { registerTaskRoutes } from './routes/task.js';
 import { registerAgentOverviewRoutes } from './routes/agent-overview.js';
 import { registerAgentLifecycleRoutes } from './routes/agent-lifecycle.js';
 import { registerKnowledgeRoutes } from './routes/knowledge/index.js';
+import { registerNotesRoutes } from './routes/notes.js';
+import { registerTipsRoutes } from './routes/tips.js';
+import { registerProjectRoutes } from './routes/project.js';
 
 const API_PREFIX = '/api/v1';
 
@@ -33,6 +36,12 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   registerAgentOverviewRoutes(api, deps);
   // Agent 生命周期业务路由：/agent/delete-cascade 在 control 层级联清 skill 再 archive
   registerAgentLifecycleRoutes(api, deps);
+    // Team Notes — 轻量团队 Markdown 交流文档（team 内共享，不做 AssetType）
+    registerNotesRoutes(api, deps);
+    // L0.5 Task Summary Tips — 只读面板（team 成员门控后转发 MemoryCore）
+    registerTipsRoutes(api, deps);
+    // Code Memory v2 project memory — L2 topics / L3 MEMORY.md（team 成员门控后转发 MemoryCore）
+    registerProjectRoutes(api, deps);
   registerKnowledgeRoutes(api, deps);
   app.route(API_PREFIX, api);
 

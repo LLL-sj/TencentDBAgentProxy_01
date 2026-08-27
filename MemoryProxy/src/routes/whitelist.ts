@@ -58,6 +58,13 @@ export const WHITELIST_ENDPOINTS: readonly WhitelistEndpoint[] = [
     supportsStream: true,
     isPrimary: true,
   },
+  {
+    pathSuffix: "/v1/responses",
+    upstreamEndpoint: "/responses",
+    protocol: "openai",
+    supportsStream: true,
+    isPrimary: true,
+  },
   // ── 辅助端点（由 handleAuxiliaryEndpoint 处理，不走路由）─────────
   {
     pathSuffix: "/v1/messages/count_tokens",

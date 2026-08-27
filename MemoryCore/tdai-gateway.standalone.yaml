@@ -25,6 +25,9 @@ llm:
 
 # ── Memory 引擎配置 ──
 memory:
+  # promptMode: chat（用户画像）| code（项目/代码工程 Agent 记忆）
+  # 本项目默认 code：L1 抽 work_fact/work_task/work_method/work_artifact。
+  promptMode: code
 
   capture:
     enabled: true
@@ -35,16 +38,17 @@ memory:
     maxMemoriesPerSession: 20
 
   persona:
-    triggerEveryN: 50
+    triggerEveryN: 10
     maxScenes: 15
 
   pipeline:
-    everyNConversations: 5
+    everyNConversations: 2
     enableWarmup: true
-    l1IdleTimeoutSeconds: 600
-    l2DelayAfterL1Seconds: 90
-    l2MinIntervalSeconds: 900
-    l2MaxIntervalSeconds: 3600
+    l1IdleTimeoutSeconds: 60
+    l2DelayAfterL1Seconds: 20
+    l2MinIntervalSeconds: 120
+    l2MaxIntervalSeconds: 1800
+    sessionActiveWindowHours: 24
 
   recall:
     enabled: true

@@ -14,6 +14,13 @@
 
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
+import {
+  EXTRACT_WORK_MEMORIES_WITH_TIPS_SYSTEM_PROMPT,
+  formatL1V2ExtractionPrompt,
+  partitionSummaryTipsByBatchTime,
+  type L1V2ShortTexts,
+  type L1V2SummaryTipPromptItem,
+} from "../prompts/code-v2/l1-extraction-with-tips.js";
 import { batchDedup } from "./l1-dedup.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
@@ -27,8 +34,50 @@ import { reportL1LatencyMetrics } from "../report/metric-tracking-l1-latency.js"
 import type { LLMRunner, Logger, TraceContext } from "../types.js";
 import { buildTraceParams } from "../types.js";
 import type { StorageAdapter } from "../storage/adapter.js";
+import type { CodeMemoryVersion } from "../../config.js";
+import { SummaryTipsStore, type SummaryTipDetail } from "../tips/summary-tips.js";
+import type { DatabaseSync } from "node:sqlite";
 
 const TAG = "[memory-tdai][l1-extractor]";
+
+// ============================
+// Code Memory v2 helpers
+// ============================
+
+/** IMemoryStore intentionally does not expose SQLite; only SQLite-backed stores implement this escape hatch. */
+interface RawSqliteStore {
+  getRawDb?: () => DatabaseSync;
+}
+
+function getSqliteTipsStore(vectorStore?: IMemoryStore): SummaryTipsStore | undefined {
+  const store = vectorStore as RawSqliteStore | undefined;
+  if (!store || typeof store.getRawDb !== "function") return undefined;
+  try {
+    return new SummaryTipsStore(store.getRawDb());
+  } catch {
+    return undefined;
+  }
+}
+
+function toL1V2SummaryTipPromptItems(items: SummaryTipDetail[]): L1V2SummaryTipPromptItem[] {
+  return items.map((tip) => ({
+    tip_id: tip.tip_id,
+    l0_start_ref: tip.l0_start_ref,
+    l0_end_ref: tip.l0_end_ref,
+    l0_start_at: tip.l0_start_at,
+    l0_end_at: tip.l0_end_at,
+    tags: tip.tags,
+    summary: tip.summary,
+    created_at: tip.created_at,
+  }));
+}
+
+function normalizeMetadata(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
 
 // ============================
 // Types
@@ -44,6 +93,8 @@ interface SceneSegment {
     priority: number;
     source_message_ids: string[];
     metadata: Record<string, unknown>;
+    source_refs?: string[];
+    confidence?: number;
   }>;
 }
 
@@ -101,6 +152,12 @@ export async function extractL1Memories(params: {
     previousSceneName?: string;
     /** Prompt family for L1 extraction (default: chat). */
     promptMode?: MemoryPromptMode;
+    /** Code Memory version switch (default: v1). v2 only applies in code prompt mode. */
+    codeMemoryVersion?: CodeMemoryVersion;
+    /** L1 v2 configurable short texts (from MemoryTdaiConfig.l1V2). */
+    l1V2ShortTexts?: L1V2ShortTexts;
+    /** Explicit SQLite-backed tips store (test/direct-call hook). */
+    summaryTipsStore?: SummaryTipsStore;
     /** Vector store for cosine similarity candidate recall */
     vectorStore?: IMemoryStore;
     /** Embedding service for computing query vectors */
@@ -134,6 +191,8 @@ export async function extractL1Memories(params: {
   const maxBgMessages = options.maxBackgroundMessages ?? 5;
   const enableDedup = options.enableDedup ?? true;
   const maxMemoriesPerSession = options.maxMemoriesPerSession ?? 10;
+  const promptMode = options.promptMode ?? "chat";
+  const useL1V2 = promptMode === "code" && (options.codeMemoryVersion ?? "v1") === "v2";
 
   if (messages.length === 0) {
     logger?.debug?.(`${TAG} No messages to extract from`);
@@ -167,6 +226,42 @@ export async function extractL1Memories(params: {
 
   logger?.debug?.(`${TAG} Extracting from ${newMessages.length} new messages (+ ${backgroundMessages.length} background) [${qualifiedMessages.length} qualified from ${messages.length} input]`);
 
+  // L0.5 summary tips: Code Memory v2 reads pending tips for this team/agent/
+  // session/task from the SQLite-backed store. TCVDB/service stores skip tips.
+  // Selected tips are consumed after a successful LLM call; deferred tips stay
+  // pending for a later batch. Failure leaves every tip pending.
+  let summaryTips: L1V2SummaryTipPromptItem[] = [];
+  let summaryTipsStore: SummaryTipsStore | undefined;
+  let injectedTipIds: string[] = [];
+  if (useL1V2 && teamId && sessionId) {
+    try {
+      summaryTipsStore = options.summaryTipsStore ?? getSqliteTipsStore(options.vectorStore);
+      if (summaryTipsStore) {
+        const pending = summaryTipsStore.list({
+          teamId,
+          agentId: agentId || undefined,
+          sessionId,
+          taskId: taskId || undefined,
+          status: "pending",
+          limit: 50,
+        });
+        const loaded = toL1V2SummaryTipPromptItems(pending.items);
+        const partition = partitionSummaryTipsByBatchTime(newMessages, loaded);
+        summaryTips = partition.selected;
+        injectedTipIds = partition.selected.map((tip) => tip.tip_id);
+        logger?.debug?.(
+          `${TAG} Loaded ${loaded.length} pending summary tip(s), selected=${partition.selected.length}, deferred=${partition.deferred.length} for L1 v2 (session=${sessionId}, task=${taskId ?? "(none)"})`,
+        );
+      } else if (summaryTipsStore === undefined) {
+        logger?.debug?.(`${TAG} L1 v2 requested but store is not SQLite-backed; continuing without summary tips`);
+      }
+    } catch (err) {
+      logger?.warn?.(`${TAG} Failed to load summary tips, continuing without tips: ${err instanceof Error ? err.message : String(err)}`);
+      summaryTips = [];
+      injectedTipIds = [];
+    }
+  }
+
   // Step 1: LLM extraction (scene segmentation + memory extraction)
   let scenes: SceneSegment[];
   try {
@@ -177,7 +272,10 @@ export async function extractL1Memories(params: {
       config,
       logger,
       model: options.model,
-      promptMode: options.promptMode,
+      promptMode,
+      codeMemoryVersion: options.codeMemoryVersion ?? "v1",
+      summaryTips,
+      l1V2ShortTexts: options.l1V2ShortTexts,
       traceContext: { teamId, userId, agentId, sessionId },
       llmRunner: options.llmRunner,
     });
@@ -185,6 +283,18 @@ export async function extractL1Memories(params: {
   } catch (err) {
     logger?.error(`${TAG} LLM extraction failed: ${err instanceof Error ? err.message : String(err)}`);
     return { success: false, extractedCount: 0, storedCount: 0, records: [], sceneNames: [] };
+  }
+
+  // LLM call succeeded: tips injected into this batch have fulfilled their
+  // L1 mission. Keep them pending on any upstream failure above.
+  for (const tipId of injectedTipIds) {
+    try {
+      if (summaryTipsStore?.markStatus(teamId!, tipId, "consumed")) {
+        logger?.debug?.(`${TAG} Marked injected summary tip consumed: ${tipId}`);
+      }
+    } catch (err) {
+      logger?.warn?.(`${TAG} Failed to mark summary tip ${tipId} consumed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Flatten all memories across scenes
@@ -199,12 +309,22 @@ export async function extractL1Memories(params: {
         logger?.warn?.(`${TAG} Skipping memory with invalid type "${mem.type}"`);
         continue;
       }
+      const metadata = normalizeMetadata(mem.metadata);
+      if (useL1V2) {
+        // v2-only fields are not L1 main-table columns; keep them in metadata_json.
+        if (Array.isArray(mem.source_refs)) {
+          metadata.source_refs = mem.source_refs.map(String);
+        }
+        if (typeof mem.confidence === "number" && Number.isFinite(mem.confidence)) {
+          metadata.confidence = mem.confidence;
+        }
+      }
       allExtracted.push({
         content: mem.content,
         type: memType,
         priority: typeof mem.priority === "number" ? mem.priority : 50,
         source_message_ids: Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [],
-        metadata: mem.metadata ?? {},
+        metadata: metadata as ExtractedMemory["metadata"],
         scene_name: scene.scene_name,
       });
     }
@@ -392,23 +512,50 @@ async function callLlmExtraction(params: {
   logger?: Logger;
   model?: string;
   promptMode?: MemoryPromptMode;
+  codeMemoryVersion?: CodeMemoryVersion;
+  summaryTips?: L1V2SummaryTipPromptItem[];
+  l1V2ShortTexts?: L1V2ShortTexts;
   /** Host-neutral LLM runner — when provided, used instead of CleanContextRunner. */
   llmRunner?: LLMRunner;
   /** langfuse 上报身份四元组（team/user/agent/session）。 */
   traceContext?: TraceContext;
 }): Promise<SceneSegment[]> {
-  const { newMessages, backgroundMessages, previousSceneName, config, logger, model, promptMode = "chat", llmRunner, traceContext } = params;
-
-  const systemPrompt = getExtractMemoriesSystemPrompt(promptMode);
-  const userPrompt = formatExtractionPrompt({
+  const {
     newMessages,
     backgroundMessages,
     previousSceneName,
-  });
+    config,
+    logger,
+    model,
+    promptMode = "chat",
+    codeMemoryVersion = "v1",
+    summaryTips = [],
+    l1V2ShortTexts,
+    llmRunner,
+    traceContext,
+  } = params;
+
+  const useL1V2 = promptMode === "code" && codeMemoryVersion === "v2";
+  const systemPrompt = useL1V2
+    ? EXTRACT_WORK_MEMORIES_WITH_TIPS_SYSTEM_PROMPT
+    : getExtractMemoriesSystemPrompt(promptMode);
+  const userPrompt = useL1V2
+    ? formatL1V2ExtractionPrompt({
+        newMessages,
+        backgroundMessages,
+        previousSceneName,
+        summaryTips,
+        shortTexts: l1V2ShortTexts,
+      })
+    : formatExtractionPrompt({
+        newMessages,
+        backgroundMessages,
+        previousSceneName,
+      });
 
   // [l1-debug] ENTRY — what are we about to ask the LLM to extract?
   logger?.debug?.(
-    `${TAG} [l1-debug] ENTRY taskId=l1-extraction, promptMode=${promptMode}, newMsgs=${newMessages.length}, bgMsgs=${backgroundMessages.length}, userPromptLen=${userPrompt.length}, sysPromptLen=${systemPrompt.length}, model=${model ?? "(default)"}, previousSceneName=${previousSceneName ? JSON.stringify(previousSceneName) : "(none)"}, runnerKind=${llmRunner ? "llmRunner" : "CleanContextRunner"}`,
+    `${TAG} [l1-debug] ENTRY taskId=l1-extraction, promptMode=${promptMode}, codeMemoryVersion=${codeMemoryVersion}, useL1V2=${useL1V2}, summaryTips=${summaryTips.length}, newMsgs=${newMessages.length}, bgMsgs=${backgroundMessages.length}, userPromptLen=${userPrompt.length}, sysPromptLen=${systemPrompt.length}, model=${model ?? "(default)"}, previousSceneName=${previousSceneName ? JSON.stringify(previousSceneName) : "(none)"}, runnerKind=${llmRunner ? "llmRunner" : "CleanContextRunner"}`,
   );
 
   let result: string;
@@ -444,14 +591,14 @@ async function callLlmExtraction(params: {
     });
   }
 
-  return parseExtractionResult(result, logger);
+  return parseExtractionResult(result, logger, useL1V2);
 }
 
 /**
  * Parse the LLM's JSON response into SceneSegment array.
  * Expected format: [{scene_name, message_ids, memories: [...]}]
  */
-function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
+function parseExtractionResult(raw: string, logger?: Logger, preserveV2Fields = false): SceneSegment[] {
   try {
     // Strip markdown code block wrappers if present
     let cleaned = raw.trim();
@@ -508,6 +655,12 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
                 priority: typeof m.priority === "number" ? m.priority : 50,
                 source_message_ids: Array.isArray(m.source_message_ids) ? m.source_message_ids.map(String) : [],
                 metadata: (m.metadata && typeof m.metadata === "object" ? m.metadata : {}) as Record<string, unknown>,
+                ...(preserveV2Fields
+                  ? {
+                      source_refs: Array.isArray(m.source_refs) ? m.source_refs.map(String) : undefined,
+                      confidence: typeof m.confidence === "number" && Number.isFinite(m.confidence) ? m.confidence : undefined,
+                    }
+                  : {}),
               }))
           : [],
       });

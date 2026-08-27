@@ -224,7 +224,7 @@ export class LocalStateBackend implements IStateBackend {
   // ═══ Atomic Capture ═══
 
   async captureAtomic(params: CaptureAtomicParams): Promise<CaptureAtomicResult> {
-    const { instanceId, sessionId, teamId, agentId, messageJson, threshold, fireAtMs, timerMember, taskPayload, nowMs, rounds } = params;
+    const { instanceId, sessionId, teamId, agentId, messageJson, threshold, fireAtMs, timerMember, taskPayload, nowMs, rounds, memoryMode } = params;
 
     await this.appendBuffer(instanceId, sessionId, messageJson, teamId, agentId);
 
@@ -237,6 +237,7 @@ export class LocalStateBackend implements IStateBackend {
 
     state.conversation_count += rounds;
     state.last_active_time = nowMs;
+    if (memoryMode) state.memory_mode = memoryMode;
 
     if (state.conversation_count >= threshold) {
       await this.enqueueTask(taskPayload);

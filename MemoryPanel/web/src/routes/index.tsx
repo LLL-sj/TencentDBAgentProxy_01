@@ -8,9 +8,10 @@ import { createHashRouter, type RouteObject } from 'react-router-dom';
 import { ConsoleLayout } from '@/layouts/ConsoleLayout';
 import { WorkbenchPage } from '@/pages/workbench/WorkbenchPage';
 import { WikiPage } from '@/pages/wiki/WikiPage';
+import { NotesPage } from '@/pages/notes/NotesPage';
 import { CodePage } from '@/pages/code/CodePage';
 import { SkillsPage } from '@/pages/skills/SkillsPage';
-import { ChatMemoryPage } from '@/pages/memory/ChatMemoryPage';
+import { MemoryPage } from '@/pages/memory/MemoryPage';
 import { MembersPage } from '@/pages/team/MembersPage';
 import { AgentsPage } from '@/pages/team/AgentsPage';
 import { ApiKeysPage } from '@/pages/team/ApiKeysPage';
@@ -21,10 +22,11 @@ export const routes: RouteObject[] = [
     element: <ConsoleLayout />,
     children: [
       { index: true, element: <WorkbenchPage /> },
+        { path: 'notes', element: <NotesPage /> },
       { path: 'wiki', element: <WikiPage /> },
       { path: 'code', element: <CodePage /> },
       { path: 'skills', element: <SkillsPage /> },
-      { path: 'memory', element: <ChatMemoryPage /> },
+      { path: 'memory', element: <MemoryPage /> },
       { path: 'team/members', element: <MembersPage /> },
       { path: 'team/agents', element: <AgentsPage /> },
       { path: 'team/api-keys', element: <ApiKeysPage /> },

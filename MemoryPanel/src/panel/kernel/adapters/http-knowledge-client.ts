@@ -30,6 +30,11 @@ import type {
   CodeGraphListResult,
   CodeGraphSyncResult,
   CodeGraphToolResult,
+  NoteDetail,
+  NoteListResult,
+  NoteSummary,
+  NoteTagSummary,
+  NotesGraphData,
 } from '../ports/knowledge-client-port.js';
 
 export interface KnowledgeClientConfig {
@@ -182,6 +187,52 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
 
   async codeGraphUpdateMeta(codeGraphId: string, patch: { repo_name?: string; summary?: string | null }): Promise<CodeGraphDetail> {
     return this.post('/v3/code-graph/update-meta', { code_graph_id: codeGraphId, ...patch });
+  }
+
+  // ═══════════════ Team Notes ═══════════════
+
+  async noteCreate(teamId: string, input: { title: string; filename?: string; content: string; tags: string[] }, userId?: string): Promise<NoteDetail> {
+    return this.post('/v3/notes/create', { team_id: teamId, user_id: userId, ...input });
+  }
+
+  async noteGet(teamId: string, noteId: string): Promise<NoteDetail> {
+    return this.post('/v3/notes/get', { team_id: teamId, note_id: noteId });
+  }
+
+  async noteUpdate(teamId: string, noteId: string, expectedVersion: number, patch: { title?: string; filename?: string; content?: string; tags?: string[] }, userId?: string): Promise<NoteDetail> {
+    return this.post('/v3/notes/update', { team_id: teamId, user_id: userId, note_id: noteId, expected_version: expectedVersion, ...patch });
+  }
+
+  async noteArchive(teamId: string, noteId: string, expectedVersion?: number): Promise<NoteDetail> {
+    return this.post('/v3/notes/delete', { team_id: teamId, note_id: noteId, expected_version: expectedVersion });
+  }
+
+  async noteList(teamId: string, opts?: { tags?: string[]; limit?: number; offset?: number; includeArchived?: boolean }): Promise<NoteListResult> {
+    return this.post('/v3/notes/list', { team_id: teamId, ...opts });
+  }
+
+  async noteSearch(teamId: string, query: string, opts?: { tags?: string[]; limit?: number; offset?: number }): Promise<NoteListResult> {
+    return this.post('/v3/notes/search', { team_id: teamId, query, ...opts });
+  }
+
+  async noteTagsList(teamId: string): Promise<{ items: NoteTagSummary[] }> {
+    return this.post('/v3/notes/tags/list', { team_id: teamId });
+  }
+
+  async noteTagPages(teamId: string, tagSlug: string): Promise<{ tag: NoteTagSummary; items: NoteSummary[] }> {
+    return this.post('/v3/notes/tags/pages', { team_id: teamId, tag_slug: tagSlug });
+  }
+
+  async noteGraph(teamId: string): Promise<NotesGraphData> {
+    return this.post('/v3/notes/graph', { team_id: teamId });
+  }
+
+  async noteMermaid(teamId: string, direction: 'LR' | 'TB' = 'LR'): Promise<{ mermaid: string }> {
+    return this.post('/v3/notes/graph/mermaid', { team_id: teamId, direction });
+  }
+
+  async noteRevisions(teamId: string, noteId: string): Promise<{ items: Array<{ revision_id: string; version: number; edited_by: string; created_at: string }> }> {
+    return this.post('/v3/notes/revisions', { team_id: teamId, note_id: noteId });
   }
 
   async codeGraphQuery(codeGraphId: string, tool: string, params: Record<string, unknown>): Promise<CodeGraphToolResult> {
