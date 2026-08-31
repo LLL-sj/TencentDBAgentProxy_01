@@ -1,9 +1,11 @@
-# FINAL.md — TencentDB-Agent-Memory 历史修改与长期维护记录
+# MAINTENANCE_AND_CHANGELOG.md — TencentDB-Agent-Memory 历史修改与长期维护记录（原 FINAL.md）
 
 > 更新日期：2026-08-27
 > 状态：三容器 healthy；三个镜像已从当前源码重建并完成冒烟；proxy 数据卷挂载已修复。
-> Git：功能改动仍未 commit，HEAD `fe3230f`。
-> 当前最新交接：`memory-agent/NEW_AGENT_HANDOFF11.md`。
+> Git：功能改动仍未 commit（本地分支 `feat/server_team`）。
+> 当前最新交接：`NEW_AGENT_HANDOFF11.md`。
+>
+> 说明：本文位于 `memory-agent/`，以下文件路径均相对本文所在目录（`memory-agent/`）。
 
 ---
 
@@ -11,16 +13,18 @@
 
 | 文件 | 用途 |
 |---|---|
+| `CURRENT_STATUS_功能实现与当前阶段.md` | 当前阶段总览：功能实现 / 目前阶段（先读） |
 | `AGENT_INDEX.md` | **部署与运维唯一入口**：服务器部署、重启、挂载、日志、升级、排障 |
-| `memory-agent/NEW_AGENT_HANDOFF11.md` | 当前最新交接：镜像重建 / H-08 / 部署脚本 |
-| `memory-agent/NEW_AGENT_HANDOFF10.md` | 上一轮：Codex Responses + L0 内部请求过滤 |
-| `memory-agent/MEMORY_MECHANISM.md` | 记忆机制最终口径 |
-| `memory-agent/L0_ROUTING_AND_EXTRACTION.md` | Codex / Claude Code 的 L0 路由与 User/Assistant 抽取 |
-| `memory-agent/TEAM_NOTES.md` | Team Notes 机制与编码校验 |
-| `memory-agent/NEW_AGENT_HANDOFF6.md` | 前六轮总交接与 code v2 完整背景 |
-| `memory-agent/NEW_AGENT_HANDOFF7~9.md` | 第七至十轮实施记录 |
-| `deploy/global-images/.env.example` | 全部部署参数模板 |
-| `deploy/global-images/start-*.sh` / `stop-all.sh` | 启动、停止、卷管理脚本 |
+| `NEW_AGENT_HANDOFF11.md` | 当前最新交接：镜像重建 / H-08 / 部署脚本 |
+| `NEW_AGENT_HANDOFF10.md` | 上一轮：Codex Responses + L0 内部请求过滤 |
+| `MEMORY_MECHANISM.md` | 记忆机制最终口径 |
+| `L0_ROUTING_AND_EXTRACTION.md` | Codex / Claude Code 的 L0 路由与 User/Assistant 抽取 |
+| `TEAM_NOTES.md` | Team Notes 机制与编码校验 |
+| `ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`） |
+| `NEW_AGENT_HANDOFF6.md` | 前六轮总交接与 code v2 完整背景 |
+| `NEW_AGENT_HANDOFF7~9.md` | 第七至十轮实施记录 |
+| `../deploy/global-images/.env.example` | 全部部署参数模板 |
+| `../deploy/global-images/start-*.sh` / `stop-all.sh` | 启动、停止、卷管理脚本 |
 
 ---
 
@@ -41,7 +45,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 
 - **改了什么**：新增唯一开关 `MEMORY_PROMPT_MODE=chat|code`，core/proxy 都从同一个 `.env` 生成配置；chat/code 提示词物理拆分。
 - **为什么**：项目 Agent 需要抽取工作事实/方法，不应混入个人画像。
-- **怎么改**：`MemoryCore/src/core/prompts/{chat,code}/`；`start-memory-core.sh` 与 `start-proxy.sh` 生成 `promptMode`。
+- **怎么改**：`../MemoryCore/src/core/prompts/{chat,code}/`；`../deploy/global-images/start-memory-core.sh` 与 `../deploy/global-images/start-proxy.sh` 生成 `promptMode`。
 
 ### 3.2 第二轮：Agent 记忆资产挂载
 
@@ -91,7 +95,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 - **Codex 内部请求污染 L0**：旧/新 guard JSON + 可配置 `codexInternal.promptPrefixes` 三层过滤。
 - **H-08 hook-cache FK 修复**：prewarm 统一使用请求 `spaceId`（handler 透传 + `sessionInfo.space_id` 兜底），消除 `_default`/`default` 不一致。
 - **部署修复**：`start-proxy.sh` 恢复 `PROXY_VOLUME` 挂载；`TDAI_DEV_SOURCE_MOUNTS` 支持服务器模式；`stop-all.sh --purge` 包含 proxy 卷；时区/重启策略可配。
-- **镜像**：三个 `:local` 镜像从当前源码重建，已运行验证；`docker save` 导出 `backups/tdai-images-local-20260827.tar.gz`。
+- **镜像**：三个 `:local` 镜像从当前源码重建，已运行验证；`docker save` 导出 `../backups/tdai-images-local-20260827.tar.gz`。
 
 ---
 

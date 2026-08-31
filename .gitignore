@@ -127,3 +127,6 @@ data/tdai-memory.db
 # Test coverage output
 coverage/
 **/coverage/
+
+# 本地调研交付（用户要求隐藏，不入库）
+MemoryProxy调研交付/

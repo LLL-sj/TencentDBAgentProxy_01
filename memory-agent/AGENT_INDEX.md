@@ -1,7 +1,8 @@
 # AGENT_INDEX.md — TDAI 三件套部署与运维手册
 
 > 本文是部署/运维的唯一入口：服务器首次部署、改配置、重启、挂载、看日志、升级镜像、排障只看这一篇。
-> 记忆机制细节看 `memory-agent/MEMORY_MECHANISM.md`；历史修改与经验看 `memory-agent/FINAL.md`。
+> 本文件位于 `memory-agent/`，文中相对路径均以仓库根目录 `TencentDB-Agent-Memory/` 为基准；若当前在 `memory-agent/` 目录，请先 `cd ..` 再执行命令。
+> 记忆机制细节看 `memory-agent/MEMORY_MECHANISM.md`；历史修改与经验看 `memory-agent/MAINTENANCE_AND_CHANGELOG.md`（原 `memory-agent/FINAL.md`）。
 
 ---
 
@@ -273,11 +274,16 @@ docker tag agentmemory/memory-hub:local agentmemory/memory-hub:local-backup-YYYY
 
 | 文件 | 内容 |
 |---|---|
-| `memory-agent/NEW_AGENT_HANDOFF11.md` | 当前最新交接（镜像重建 / H-08 / 部署脚本） |
-| `memory-agent/FINAL.md` | 历史修改、经验、剩余问题 |
+| `memory-agent/CURRENT_STATUS_功能实现与当前阶段.md` | 当前阶段：功能实现 / 目前阶段（新 Agent 先读） |
+| `memory-agent/AGENT_INDEX.md` | 本文件：部署与运维唯一入口 |
 | `memory-agent/MEMORY_MECHANISM.md` | 记忆机制最终口径 |
 | `memory-agent/L0_ROUTING_AND_EXTRACTION.md` | Codex/Claude Code L0 抽取 |
 | `memory-agent/TEAM_NOTES.md` | Team Notes 机制 |
+| `memory-agent/MAINTENANCE_AND_CHANGELOG.md` | 历史修改、经验、剩余问题（原 `FINAL.md`） |
+| `memory-agent/ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`） |
+| `memory-agent/NEW_AGENT_HANDOFF11.md` | 当前最新交接（镜像重建 / H-08 / 部署脚本） |
+| `memory-agent/NEW_AGENT_HANDOFF10.md` | 上一轮：Codex Responses + L0 内部请求过滤 |
+| `memory-agent/NEW_AGENT_HANDOFF6~9.md` | 历轮交接实施记录（需要历史背景时再看） |
 
 ### 8.2 部署与配置
 
