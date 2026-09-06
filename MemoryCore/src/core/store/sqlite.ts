@@ -2589,8 +2589,8 @@ export class VectorStore implements IMemoryStore {
       const rows = this.db
         .prepare(`SELECT session_id,
             COUNT(*) AS message_count,
-            MIN(recorded_at_ms) AS first_recorded_at_ms,
-            MAX(recorded_at_ms) AS last_recorded_at_ms
+            MIN(timestamp) AS first_recorded_at_ms,
+            MAX(timestamp) AS last_recorded_at_ms
           FROM l0_conversations ${where}
           GROUP BY session_id
           ORDER BY last_recorded_at_ms DESC
