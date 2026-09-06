@@ -56,12 +56,15 @@ export function CodeMemoryDetail({
   teamId,
   agentId,
   layer,
+  canEdit = false,
   onLayerChange,
 }: {
   block: MemoryBlock;
   teamId: string;
   agentId?: string;
   layer: CodeMemoryLayer;
+  /** Whether the current user is the memory asset owner and may edit Code L2 topics. */
+  canEdit?: boolean;
   onLayerChange: (layer: CodeMemoryLayer) => void;
 }) {
   const { t } = useTranslation();
@@ -332,6 +335,19 @@ export function CodeMemoryDetail({
     }
   }, [block.id, teamId]);
 
+  async function editTopicFromPath(topicPath: string, content?: string) {
+    try {
+      let editContent = content;
+      if (!editContent) {
+        const detail = await projectApi.read({ teamId, blockId: block.id }, topicPath);
+        editContent = detail.content;
+      }
+      setEditTopic({ path: topicPath, content: editContent });
+    } catch (err) {
+      tea.notify.error(err instanceof Error ? err.message : t('memory.notify.saveFailed'));
+    }
+  }
+
   async function saveTopicEdit() {
     if (!editTopic) return;
     setTopicSaving(true);
@@ -445,8 +461,9 @@ export function CodeMemoryDetail({
             loading={projectLoading}
             error={projectError}
             topicLoadingId={topicLoadingId}
+            canEdit={canEdit}
             onOpenTopic={openTopic}
-            onEditTopic={(topicPath, content) => setEditTopic({ path: topicPath, content })}
+            onEditTopic={editTopicFromPath}
             onDeleteTopic={(topicPath) => void deleteTopic(topicPath)}
           />
         ) : null}
@@ -754,6 +771,7 @@ function ProjectTopicsView({
   loading,
   error,
   topicLoadingId,
+  canEdit = false,
   onOpenTopic,
   onEditTopic,
   onDeleteTopic,
@@ -764,8 +782,9 @@ function ProjectTopicsView({
   loading: boolean;
   error: string;
   topicLoadingId: string | null;
+  canEdit?: boolean;
   onOpenTopic: (path: string) => void;
-  onEditTopic?: (path: string, content: string) => void;
+  onEditTopic?: (path: string, content?: string) => void;
   onDeleteTopic?: (path: string) => void;
 }) {
   const { t } = useTranslation();
@@ -779,21 +798,42 @@ function ProjectTopicsView({
     <div className="_code-memory-project-layout">
       <div className="_code-memory-project-list">
         {topics.map((topic) => (
-          <button
-            key={topic.path}
-            type="button"
-            className={`_code-memory-project-item${selectedTopic?.path === topic.path ? ' _code-memory-project-item--selected' : ''}`}
-            disabled={topicLoadingId === topic.path}
-            onClick={() => void onOpenTopic(topic.path)}
-          >
-            <div className="_code-memory-project-item-title">{topic.title}</div>
-            <div className="_code-memory-project-item-path">{topic.path}</div>
-            <div className="_code-memory-project-item-meta">
-              <span className="_code-memory-project-type">{topic.type}</span>
-              {topic.tags.slice(0, 4).map((tag) => <span key={tag} className="_code-memory-project-tag">#{tag}</span>)}
-              {topic.updated ? <span className="_code-memory-project-updated">{formatTopicUpdated(topic.updated)}</span> : null}
-            </div>
-          </button>
+          <div key={topic.path} className={`_code-memory-project-item-row${selectedTopic?.path === topic.path ? ' _code-memory-project-item-row--selected' : ''}`}>
+            <button
+              type="button"
+              className={`_code-memory-project-item${selectedTopic?.path === topic.path ? ' _code-memory-project-item--selected' : ''}`}
+              disabled={topicLoadingId === topic.path}
+              onClick={() => void onOpenTopic(topic.path)}
+            >
+              <div className="_code-memory-project-item-title">{topic.title}</div>
+              <div className="_code-memory-project-item-path">{topic.path}</div>
+              <div className="_code-memory-project-item-meta">
+                <span className="_code-memory-project-type">{topic.type}</span>
+                {topic.tags.slice(0, 4).map((tag) => <span key={tag} className="_code-memory-project-tag">#{tag}</span>)}
+                {topic.updated ? <span className="_code-memory-project-updated">{formatTopicUpdated(topic.updated)}</span> : null}
+              </div>
+            </button>
+            {canEdit && (
+              <div className="_code-memory-project-item-actions">
+                <button
+                  type="button"
+                  className="_code-memory-project-edit-btn"
+                  title={t('common.edit')}
+                  onClick={() => void onEditTopic?.(topic.path)}
+                >
+                  {t('common.edit')}
+                </button>
+                <button
+                  type="button"
+                  className="_code-memory-project-delete-btn"
+                  title={t('common.delete')}
+                  onClick={() => onDeleteTopic?.(topic.path)}
+                >
+                  {t('common.delete')}
+                </button>
+              </div>
+            )}
+          </div>
         ))}
       </div>
 
@@ -805,20 +845,24 @@ function ProjectTopicsView({
               <div className="_code-memory-project-actions">
                 <span className="_code-memory-project-path">{selectedTopic.path}</span>
                 {selectedTopic.updated ? <span className="_code-memory-project-updated">Updated: {formatTopicUpdated(selectedTopic.updated)}</span> : null}
-                <button
-                  type="button"
-                  className="_code-memory-project-edit-btn"
-                  onClick={() => onEditTopic?.(selectedTopic.path, selectedTopic.content)}
-                >
-                  {t('common.edit')}
-                </button>
-                <button
-                  type="button"
-                  className="_code-memory-project-delete-btn"
-                  onClick={() => onDeleteTopic?.(selectedTopic.path)}
-                >
-                  {t('common.delete')}
-                </button>
+                {canEdit && (
+                  <>
+                    <button
+                      type="button"
+                      className="_code-memory-project-edit-btn"
+                      onClick={() => onEditTopic?.(selectedTopic.path, selectedTopic.content)}
+                    >
+                      {t('common.edit')}
+                    </button>
+                    <button
+                      type="button"
+                      className="_code-memory-project-delete-btn"
+                      onClick={() => onDeleteTopic?.(selectedTopic.path)}
+                    >
+                      {t('common.delete')}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
             <div className="_code-memory-project-tags">

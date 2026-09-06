@@ -384,3 +384,31 @@
   color: var(--tea-color-text-tertiary);
   word-break: break-all;
 }
+
+/* Code L2 list row-level edit/delete actions */
+._code-memory-project-item-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+}
+
+._code-memory-project-item-row ._code-memory-project-item {
+  flex: 1;
+  min-width: 0;
+}
+
+._code-memory-project-item-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+._code-memory-project-item-actions ._code-memory-project-edit-btn,
+._code-memory-project-item-actions ._code-memory-project-delete-btn {
+  padding: 4px 6px;
+  font-size: 11px;
+  line-height: 1.2;
+}

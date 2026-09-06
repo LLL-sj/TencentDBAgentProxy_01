@@ -376,6 +376,7 @@ export function CodeMemoryPanel() {
               teamId={activeTeamId}
               agentId={selectedAgentId}
               layer={layer}
+              canEdit={selected.uploaded_by_user_id === currentUserId}
               onLayerChange={setLayer}
             />
           )
