@@ -108,6 +108,24 @@ export interface ClickHouseRawUsageRow {
   upstream_request_id: string; // 上游响应 header `x-request-id`（追溯用；与主表对齐）
 }
 
+/** One coarse-grained per-request timing row, one request = one row. */
+export interface RequestStageTimingRow {
+  timestamp: string;
+  request_id: string;
+  model: string;
+  protocol: string;
+  session_key: string;
+  stream: number;
+  total_ms: number;
+  local_prepare_ms: number;
+  build_request_ms: number;
+  upstream_ttfb_ms: number;
+  upstream_stream_ms: number;
+  proxy_tail_ms: number;
+  client_network_tail_ms: number;
+  postprocess_ms: number;
+}
+
 // ── Writer state ────────────────────────────────────────────────────────────
 
 const HOST_ID = hostname();
@@ -116,6 +134,7 @@ let config: ClickHouseConfig | null = null;
 let client: ClickHouseClient | null = null;
 let buffer: ClickHouseRow[] = [];
 let rawBuffer: ClickHouseRawUsageRow[] = [];
+let timingBuffer: RequestStageTimingRow[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let disabled = false;
 
@@ -137,10 +156,11 @@ export function initClickHouse(cfg: ClickHouseConfig): void {
   config = cfg;
   disabled = false;
 
-  // Periodic flush (both main and raw buffers)
+  // Periodic flush (usage, raw usage, and request timing buffers)
   flushTimer = setInterval(() => {
     void flush();
     void flushRaw();
+    void flushTimings();
   }, cfg.flushIntervalMs);
   flushTimer.unref(); // Don't prevent process exit
 
@@ -271,6 +291,31 @@ async function ensureClickHouse(cfg: ClickHouseConfig): Promise<void> {
     });
   }
 
+  // Coarse-grained request stage timing table (one row per request).
+  const timingDdl = [
+    `CREATE TABLE IF NOT EXISTS request_stage_timings (`,
+    "  timestamp DateTime64(3, 'Asia/Shanghai'),",
+    "  request_id String,",
+    "  model String,",
+    "  protocol LowCardinality(String),",
+    "  session_key String,",
+    "  stream UInt8,",
+    "  total_ms UInt32,",
+    "  local_prepare_ms UInt32,",
+    "  build_request_ms UInt32,",
+    "  upstream_ttfb_ms UInt32,",
+    "  upstream_stream_ms UInt32,",
+    "  proxy_tail_ms UInt32,",
+    "  client_network_tail_ms UInt32,",
+    "  postprocess_ms UInt32",
+    ") ENGINE = MergeTree()",
+    "ORDER BY (timestamp)",
+  ].filter(Boolean).join("\n");
+  await client.command({
+    query: timingDdl,
+    clickhouse_settings: { wait_end_of_query: 1 },
+  });
+
   // 补齐历史 schema 漂移：对存量表执行 ALTER TABLE ADD COLUMN IF NOT EXISTS。
   // 幂等且失败不阻断（缺 DDL 权限时降级为 warn，业务继续用可写字段）。
   await migrateSchema(client, cfg);
@@ -278,6 +323,7 @@ async function ensureClickHouse(cfg: ClickHouseConfig): Promise<void> {
   log.info("clickhouse.init.tableReady", {
     table: `${cfg.database}.${cfg.table}`,
     rawTable: cfg.rawTable ? `${cfg.database}.${cfg.rawTable}` : undefined,
+    timingTable: `${cfg.database}.request_stage_timings`,
     ttlDays: cfg.ttlDays,
   });
 }
@@ -397,7 +443,7 @@ const CH_UTC_OFFSET_HOURS = 8;
  * Input:  "2026-06-16T10:00:00.000Z"  (UTC)
  * Output: "2026-06-16 18:00:00.000"   (北京墙钟；按列时区解析回的 epoch = 原 UTC 时刻)
  */
-function toChTimestamp(iso: string): string {
+export function toChTimestamp(iso: string): string {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) {
     // 解析失败时回退到不做偏移的裸格式化（尽量不丢数据）。
@@ -735,6 +781,35 @@ export function writeClickHouse(entry: ClickHouseWriteEntry): void {
   }
 }
 
+/**
+ * Write one request-stage timing row to ClickHouse.
+ *
+ * Fire-and-forget: never throws. This must be called only after the client
+ * response has been handed off/finished, so timing/analytics never block the
+ * user-visible stream.
+ */
+export function writeRequestTiming(row: RequestStageTimingRow): void {
+  if (disabled || !config) return;
+  try {
+    timingBuffer.push(row);
+    if (timingBuffer.length >= (config?.flushThreshold ?? 50)) {
+      void flushTimings();
+    }
+  } catch {
+    // Silent — never block business logic.
+  }
+}
+
+/** Re-enqueue failed timing rows for retry, capping buffer. */
+function requeueTiming(rows: RequestStageTimingRow[]): void {
+  timingBuffer.unshift(...rows);
+  if (timingBuffer.length > 10000) {
+    const dropped = timingBuffer.length - 5000;
+    timingBuffer = timingBuffer.slice(timingBuffer.length - 5000);
+    log.warn("clickhouse.timingBuffer.overflow", { dropped });
+  }
+}
+
 /** Re-enqueue failed rows for retry, capping buffer to prevent unbounded growth. */
 function requeue(rows: ClickHouseRow[]): void {
   buffer.unshift(...rows);
@@ -808,6 +883,32 @@ export async function flushRaw(): Promise<void> {
 }
 
 /**
+ * Flush buffered request-stage timing rows to ClickHouse.
+ * Returns a promise; callers may ignore it for fire-and-forget.
+ */
+export async function flushTimings(): Promise<void> {
+  if (!config || !client || timingBuffer.length === 0) return;
+
+  const rows = timingBuffer.splice(0);
+  try {
+    await client.insert({
+      table: "request_stage_timings",
+      values: rows,
+      format: "JSONEachRow",
+      clickhouse_settings: { async_insert: 1, wait_for_async_insert: 1 },
+    });
+    log.debug("clickhouse.flushTimings.ok", { rows: rows.length });
+  } catch (err: unknown) {
+    log.error(
+      "clickhouse.flushTimings.error",
+      { rows: rows.length },
+      err instanceof Error ? err : new Error(String(err)),
+    );
+    requeueTiming(rows);
+  }
+}
+
+/**
  * Graceful shutdown: stop timer, flush remaining buffer, close client.
  */
 export async function shutdownClickHouse(): Promise<void> {
@@ -817,6 +918,7 @@ export async function shutdownClickHouse(): Promise<void> {
   }
   await flush();
   await flushRaw();
+  await flushTimings();
   if (client) {
     await client.close().catch(() => {});
     client = null;

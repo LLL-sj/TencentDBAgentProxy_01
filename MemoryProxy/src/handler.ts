@@ -4,6 +4,11 @@ import type { Context } from "hono";
 import { createHash } from "node:crypto";
 import { writeLog, createPipeline } from "./logger.js";
 import {
+  attachClientFinishTiming,
+  markTime,
+  type Timeline,
+} from "./timing.js";
+import {
   apiKeyToKeyId,
   extractBearerToken,
   opikCreateLlmSpan,
@@ -678,6 +683,8 @@ export async function handleChatCompletions(
 ): Promise<Response> {
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
+  const timeline: Timeline = {};
+  markTime(timeline, "t0");
 
   // ── Early auth ──────────────────────────────────────────────────────────
   // Verify BEFORE parsing the body so a rejected caller never triggers body
@@ -1283,6 +1290,7 @@ export async function handleChatCompletions(
   });
 
   // ── Create pipeline logger ──────────────────────────────────────────────
+  markTime(timeline, "t1");
   const pipe = createPipeline(config, traceId, target.model);
   pipe.requestReceived(messages.length, isStream);
 
@@ -1379,6 +1387,7 @@ export async function handleChatCompletions(
 
   // ── Forward to upstream (with automatic retry if configured) ──────────────
   const forwardTimeoutMs = config.server.forwardTimeoutMs ?? 600_000;
+  markTime(timeline, "t2");
   pipe.forwardStart();
   let upstreamResp: Response;
   let retried = false;
@@ -1393,6 +1402,7 @@ export async function handleChatCompletions(
     );
     upstreamResp = result.resp;
     retried = result.retried;
+    markTime(timeline, "t3");
   } catch (err: unknown) {
     if (isRateLimitExceededError(err)) {
       pipe.info("RATE_LIMIT", "TPM/QPM exceeded");
@@ -1494,6 +1504,7 @@ export async function handleChatCompletions(
       upstreamRequestId,
       langfuseDebug,
       debugMetadata,
+      timeline,
     };
     // Manual ReadableStream replaces TransformStream — Node.js flush() bug (#19)
     const usReader = upstreamResp.body.getReader();
@@ -1529,6 +1540,7 @@ export async function handleChatCompletions(
         }
 
         if (readDone) {
+          markTime(timeline, "t4");
           if (usSseBuf.trim()) {
             const u = extractSseUsage(usSseBuf);
             if (u) usLastUsage = u;
@@ -1536,17 +1548,21 @@ export async function handleChatCompletions(
             usAssistantContent += content;
             mergeToolCallDeltas(usToolAcc, toolCallDeltas);
           }
-          try {
-            await finalizeStreamTap(tapCtx, usLastUsage, usAssistantContent, usToolAcc);
-          } catch (finalizeErr) {
-            // Finalization is observability/L0 bookkeeping; never break the
-            // already-complete SSE stream because of it.
-            console.error(
-              `[openai-stream] finalize failed session=${sessionKey} ` +
-              `error=${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`,
-            );
-          }
+          // Let the user see the end of the SSE stream immediately; finalize
+          // (L0/ClickHouse/Langfuse/skill/credit) runs after close.
+          markTime(timeline, "t5");
           controller.close();
+          void finalizeStreamTap(tapCtx, usLastUsage, usAssistantContent, usToolAcc)
+            .then(() => markTime(timeline, "t7"))
+            .catch((finalizeErr) => {
+              // Finalization is observability/L0 bookkeeping; never break the
+              // already-complete SSE stream because of it.
+              console.error(
+                `[openai-stream] finalize failed session=${sessionKey} ` +
+                `error=${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`,
+              );
+              markTime(timeline, "t7");
+            });
           return;
         }
 
@@ -1575,11 +1591,21 @@ export async function handleChatCompletions(
       },
     });
 
+    attachClientFinishTiming(c, timeline, config, {
+      requestId: traceId,
+      model: effectiveModel,
+      protocol: "openai",
+      sessionKey,
+      stream: true,
+      timestamp: new Date().toISOString(),
+    });
+
     return new Response(tappedStream, { status: upstreamResp.status, headers: respHeaders });
   }
 
   // ── Non-streaming response ───────────────────────────────────────────────
   const respText = await upstreamResp.text();
+  markTime(timeline, "t4");
   const endTime = new Date().toISOString();
 
   let usage: Record<string, unknown> | null = null;
@@ -1652,7 +1678,16 @@ export async function handleChatCompletions(
           console.log("[TRACE] " + JSON.stringify(trace2));
         } catch (_e) {}
       }
-      await recordTdaiTurn(tdaiClient, tdaiIdentity, tdaiUserMessage, assistantContentForTdai(assistantMessage));
+      // OpenAI non-streaming L0: unify with streaming path and do not block
+      // the user-facing response. `trackWrite` + retry remain safe on shutdown.
+      trackWrite(
+        withL0Retry(() => recordTdaiTurn(
+          tdaiClient!,
+          tdaiIdentity,
+          tdaiUserMessage,
+          assistantContentForTdai(assistantMessage),
+        )).catch((err: unknown) => pipe.error("TDAI_L0", err))
+      );
     } else if (tdaiClient) {
       logExtractionSkipped(config, "tdai-memory", sessionKey);
     }
@@ -1769,6 +1804,16 @@ export async function handleChatCompletions(
     );
   }
 
+  markTime(timeline, "t5");
+  attachClientFinishTiming(c, timeline, config, {
+    requestId: traceId,
+    model: effectiveModel,
+    protocol: "openai",
+    sessionKey,
+    stream: false,
+    timestamp: new Date().toISOString(),
+  });
+
   return new Response(respText, { status: upstreamResp.status, headers: respHeaders });
 }
 
@@ -1862,6 +1907,8 @@ interface TapContext {
   langfuseDebug: boolean;
   /** buildRequestDebugMetadata 结果；debug=false 时为 {}。 */
   debugMetadata: Record<string, unknown>;
+  /** Coarse-grained request timing marks shared with the outer handler. */
+  timeline: Timeline;
 }
 
 /** Accumulated tool call state during SSE streaming. */

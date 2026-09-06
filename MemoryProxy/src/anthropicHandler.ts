@@ -11,6 +11,11 @@ import type { Context } from "hono";
 import { createHash } from "node:crypto";
 import { writeLog, createPipeline } from "./logger.js";
 import {
+  attachClientFinishTiming,
+  markTime,
+  type Timeline,
+} from "./timing.js";
+import {
   apiKeyToKeyId,
   opikCreateLlmSpan,
   opikCreateTrace,
@@ -550,6 +555,8 @@ export async function handleAnthropicMessages(
 ): Promise<Response> {
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
+  const timeline: Timeline = {};
+  markTime(timeline, "t0");
 
   // ── Early auth ──────────────────────────────────────────────────────────
   // Verify BEFORE parsing the body so a rejected caller never triggers body
@@ -1128,6 +1135,7 @@ export async function handleAnthropicMessages(
   });
 
   // ── Create pipeline logger ──────────────────────────────────────────────
+  markTime(timeline, "t1");
   const pipe = createPipeline(config, traceId, target.model);
   pipe.requestReceived(messages.length, isStream);
   if (ccRoutingEnabled) {
@@ -1240,6 +1248,7 @@ export async function handleAnthropicMessages(
 
   // ── Forward to upstream (with automatic retry if configured) ──────────────
   const forwardTimeoutMs = config.server.forwardTimeoutMs ?? 600_000;
+  markTime(timeline, "t2");
   pipe.forwardStart();
   let upstreamResp: Response;
   let retried = false;
@@ -1254,6 +1263,7 @@ export async function handleAnthropicMessages(
     );
     upstreamResp = result.resp;
     retried = result.retried;
+    markTime(timeline, "t3");
   } catch (err: unknown) {
     if (isRateLimitExceededError(err)) {
       pipe.info("RATE_LIMIT", "TPM/QPM exceeded");
@@ -1359,15 +1369,28 @@ export async function handleAnthropicMessages(
       requestKind,
       langfuseDebug,
       debugMetadata,
+      timeline,
     });
 
-    const clientStream = rawClientStream.pipeThrough(createSseThinkingFixStream(pipe));
+    const clientStream = rawClientStream.pipeThrough(createSseThinkingFixStream(pipe, timeline));
+    // t5 is marked in the transform's flush() when the upstream client-side
+    // stream is complete and about to be handed to the user. Attach finish
+    // listener now to measure the server→client network tail.
+    attachClientFinishTiming(c, timeline, config, {
+      requestId: traceId,
+      model: effectiveModel,
+      protocol: "anthropic",
+      sessionKey,
+      stream: true,
+      timestamp: new Date().toISOString(),
+    });
 
     return new Response(clientStream, { status: upstreamResp.status, headers: respHeaders });
   }
 
   // ── Non-streaming response ───────────────────────────────────────────────
   let respText = await upstreamResp.text();
+  markTime(timeline, "t4");
   const endTime = new Date().toISOString();
 
   let usage: Record<string, unknown> | null = null;
@@ -1573,6 +1596,16 @@ export async function handleAnthropicMessages(
     );
   }
 
+  markTime(timeline, "t5");
+  attachClientFinishTiming(c, timeline, config, {
+    requestId: traceId,
+    model: effectiveModel,
+    protocol: "anthropic",
+    sessionKey,
+    stream: false,
+    timestamp: new Date().toISOString(),
+  });
+
   return new Response(respText, { status: upstreamResp.status, headers: respHeaders });
 }
 
@@ -1582,6 +1615,7 @@ export async function handleAnthropicMessages(
  */
 function createSseThinkingFixStream(
   pipe: ReturnType<typeof createPipeline>,
+  timeline: Timeline,
 ): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -1666,6 +1700,7 @@ function createSseThinkingFixStream(
     },
 
     flush(controller) {
+      markTime(timeline, "t5");
       if (sseBuf.trim()) {
         controller.enqueue(encoder.encode(sseBuf));
       }
@@ -1716,13 +1751,15 @@ interface AnthropicTapContext {
   langfuseDebug: boolean;
   /** buildRequestDebugMetadata 求值结果；debug=false 时为 {}。 */
   debugMetadata: Record<string, unknown>;
+  /** Coarse-grained request timing marks shared with the outer handler. */
+  timeline: Timeline;
 }
 
 /**
  * Consume Anthropic SSE stream in background, extract usage, log + Opik.
  */
 function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: AnthropicTapContext): void {
-  const { config, modelId, keyId, sessionKey, upstreamUrl, traceId, forkTraceId, startTime, inputMessages, system, retried, logMeta, pipe, lf, spaceId, upstreamRequestId } = ctx;
+  const { config, modelId, keyId, sessionKey, upstreamUrl, traceId, forkTraceId, startTime, inputMessages, system, retried, logMeta, pipe, lf, spaceId, upstreamRequestId, timeline } = ctx;
 
   (async () => {
     const decoder = new TextDecoder();
@@ -1924,7 +1961,10 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
       const reader = stream.getReader();
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          markTime(timeline, "t4");
+          break;
+        }
 
         sseBuf += decoder.decode(value, { stream: true });
 
