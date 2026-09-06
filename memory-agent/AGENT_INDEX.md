@@ -1,4 +1,4 @@
-# AGENT_INDEX.md — TDAI 三件套部署与运维手册
+# AGENT_INDEX.md — TDAI 部署与运维手册（含可观测组件）
 
 > 本文是部署/运维的唯一入口：服务器首次部署、改配置、重启、挂载、看日志、升级镜像、排障只看这一篇。
 > 本文件位于 `memory-agent/`，文中相对路径均以仓库根目录 `TencentDB-Agent-Memory/` 为基准；若当前在 `memory-agent/` 目录，请先 `cd ..` 再执行命令。
@@ -6,15 +6,28 @@
 
 ---
 
-## 1. 三件套总览
+## 1. 组件总览（当前服务器实际端口）
 
-| 容器 | 镜像 | 端口 | 作用 |
-|---|---|---|---|
-| `tdai-memory-core` | `agentmemory/memory-core` | 8420 | 记忆内核：L0/L0.5/L1/L2/L3、鉴权、skill |
-| `tdai-memory-hub` | `agentmemory/memory-hub` | 8125 / 8424 | Panel 管理端 + Knowledge/Team Notes |
-| `tdai-proxy` | `agentmemory/memory-proxy` | 8096 | Agent 请求入口：转发 LLM + 注入记忆 |
+> 所有容器都在 Docker 网络 `tdai-memory-stack` 内。以下端口为新服务器建议映射；实际 IP/域名在 `.env` 中配置。
 
-所有启动/停止/配置脚本都在 `deploy/global-images/`。
+### 1.1 TDAI 三件套
+
+| 容器 | 镜像 | 容器内端口 | 服务器映射端口 | 作用 |
+|---|---|---|---|---|
+| `tdai-memory-core` | `agentmemory/memory-core:local` | 8420 | `28420` | 记忆内核：L0/L0.5/L1/L2/L3、鉴权、skill |
+| `tdai-memory-hub` | `agentmemory/memory-hub:local` | 8125 / 8424 | `28125` / `28424` | Panel 管理端 + Knowledge/Team Notes |
+| `tdai-proxy` | `agentmemory/memory-proxy:local` | 8096 | `28096` | Agent 请求入口：转发 LLM + 注入记忆 |
+
+### 1.2 可观测与基础设施组件
+
+| 容器 | 镜像 | 容器内端口 | 服务器映射端口 | 作用 |
+|---|---|---|---|---|
+| `tdai-redis` | `redis:7` | 6379 | `26379` | Redis 缓存 / 限流计数 / 状态共享 |
+| `tdai-clickhouse` | `clickhouse/clickhouse-server:24.8` | 8123 / 9000 | `28123` / `29000` | 用量日志存储（ClickHouse） |
+| `tdai-postgres` | `postgres:16` | 5432 | 不对外 | Langfuse 的 PostgreSQL 数据库 |
+| `tdai-langfuse` | `langfuse/langfuse:2` | 3000 | `23000` | LLM Trace 可视化平台（Langfuse UI） |
+
+启动脚本都在 `deploy/global-images/`：`start-infra.sh` 启动 Redis/ClickHouse/Postgres/Langfuse；`start-all.sh` 启动 TDAI 三件套。数据卷为 `tdai-clickhouse-data`、`tdai-postgres-data`。
 
 ---
 
@@ -24,8 +37,17 @@
 
 只准备两样，**不要拷贝本机数据**：
 
-1. 镜像包：`tdai-images-local-20260827.tar.gz`
+1. TDAI 镜像包：`tdai-images-local-20260827.tar.gz`
 2. 目录：`deploy/global-images/`（脚本 + `.env.example`，不需要仓库源码目录）
+
+若启用 Redis / ClickHouse / Langfuse，还需要准备以下离线镜像包并放到服务器 `~/tdai-memory/images/` 与 TDAI 镜像并列：
+
+```text
+redis.tar.gz
+clickhouse.tar.gz
+langfuse.tar.gz
+postgres.tar.gz
+```
 
 不要拷贝本机的 `.env`、`.admin-key`、`backups/`、Docker volumes；服务器会生成自己的一套。
 
@@ -33,10 +55,14 @@
 
 ```bash
 docker load -i tdai-images-local-20260827.tar.gz
-docker images | grep agentmemory/memory
+# 需要可观测组件时再导入：
+docker load -i redis.tar.gz
+docker load -i clickhouse.tar.gz
+docker load -i postgres.tar.gz
+docker load -i langfuse.tar.gz
 ```
 
-应看到三个 `agentmemory/memory-*:local`。
+应看到三个 `agentmemory/memory-*:local`，以及 `redis:7`、`clickhouse/clickhouse-server:24.8`、`postgres:16`、`langfuse/langfuse:2`。
 
 ### 2.3 生成自己的 .env
 
@@ -79,7 +105,38 @@ TDAI_TZ=Asia/Shanghai
 - `TDAI_DEV_SOURCE_MOUNTS=0`：只挂配置文件和三个数据卷，不依赖源码目录。
 - 本机开发才改成 `1`，此时要求仓库目录存在且脚本在仓库内运行。
 
-### 2.5 预检与启动
+### 2.5 启动基础设施组件（服务器上）
+
+如果只用 TDAI 三件套，**跳过本节**；需要 Redis/ClickHouse/Langfuse 时：
+
+1. 编辑 `.env`，把需要的组件开关改为 `1`：
+   ```bash
+   REDIS_ENABLED=1
+   CLICKHOUSE_ENABLED=1
+   LANGFUSE_ENABLED=1
+   ```
+   并填写 `REDIS_PASSWORD`、`CLICKHOUSE_PASSWORD`、`POSTGRES_PASSWORD` 和三个 Langfuse 密钥。
+
+2. 启动基础设施：
+   ```bash
+   cd deploy/global-images
+   ./start-infra.sh
+   ```
+
+3. 首次使用 Langfuse：
+   - 浏览器打开 `LANGFUSE_PUBLIC_URL`（例如 `http://<新服务器IP>:23000`）；
+   - 注册管理员账号，创建 Project；
+   - 在 Project Settings → API Keys 生成 `public_key` / `secret_key`；
+   - 回填到 `.env`：
+     ```bash
+     LANGFUSE_PUBLIC_KEY=...
+     LANGFUSE_SECRET_KEY=...
+     ```
+   - 重新执行 `./start-proxy.sh`（或 `./start-all.sh`）让 proxy 启用 Trace 上报。
+
+4. 最后再启动 TDAI 三件套（下一节）。
+
+### 2.6 预检与启动 TDAI 三件套
 
 ```bash
 ./verify.sh                 # 校验 .env、端口、LLM 通路
@@ -92,9 +149,9 @@ TDAI_TZ=Asia/Shanghai
 cat .admin-key              # 拿 admin key，登录 Panel / 配置 Agent
 ```
 
-### 2.6 防火墙
+### 2.7 防火墙
 
-服务器需放行：`8420`、`8125`、`8424`、`8096`。Panel/Core/Knowledge 不建议直接公网暴露。
+服务器需放行：`28096`、`28125`、`28424`、`28420`、`23000`、`26379`、`28123`、`29000`。Panel/Core/Knowledge 不建议直接公网暴露；Redis/ClickHouse/Langfuse UI 建议限制访问。
 
 ---
 
@@ -110,6 +167,11 @@ cat .admin-key              # 拿 admin key，登录 Panel / 配置 Agent
 | 对外地址 | `MEMORY_PROXY_PUBLIC_BASE_URL` | 注入给 Agent 的 curl 地址，不能是 127.0.0.1 |
 | 端口 | `MEMORY_CORE_PORT/PANEL_PORT/KNOWLEDGE_PORT/PROXY_PORT` | 有冲突才改 |
 | 数据卷 | `MEMORY_CORE_VOLUME/PANEL_VOLUME/PROXY_VOLUME` | 默认不要改 |
+| Redis | `REDIS_ENABLED/HOST/PORT/PASSWORD/HOST_PORT` | 开启后 proxy 使用 Redis 缓存与限流 |
+| ClickHouse | `CLICKHOUSE_ENABLED/URL/USER/PASSWORD/DB/HTTP_PORT/TCP_PORT` | 开启后 proxy 写入用量日志 |
+| Langfuse | `LANGFUSE_ENABLED/HOST/PUBLIC_URL/PORT/PUBLIC_KEY/SECRET_KEY/NEXTAUTH_SECRET/SALT/ENCRYPTION_KEY` | 开启后 proxy 上报 LLM Trace |
+| Postgres | `POSTGRES_DB/USER/PASSWORD` | 仅供 Langfuse 使用 |
+| Proxy 文件日志 | `PROXY_LOG_FILE` | 开启后额外落盘 proxy.log / JSONL |
 | 记忆模式 | `MEMORY_PROMPT_MODE=chat/code` | 项目场景用 `code` |
 | Code Memory | `MEMORY_CODE_MEMORY_VERSION=v1/v2`、`MEMORY_PROJECT_MEMORY_*` | v2 项目记忆 |
 | L1 触发 | `MEMORY_L1_EVERY_N/IDLE_TIMEOUT` | 抽取频率 |
@@ -132,9 +194,11 @@ cat .admin-key              # 拿 admin key，登录 Panel / 配置 Agent
 
 ```bash
 cd deploy/global-images
-./start-all.sh              # 启动全部（会重建容器，数据卷保留）
-./stop-all.sh               # 停止并删除容器，保留数据卷
-./stop-all.sh --purge       # 危险：连三个数据卷一起删
+./start-infra.sh            # 启动 Redis/ClickHouse/Postgres/Langfuse（按 .env 开关）
+./start-all.sh              # 启动 TDAI 三件套（会重建容器，数据卷保留）
+./stop-all.sh               # 停止并删除 TDAI 容器，保留数据卷
+./stop-infra.sh             # 停止并删除基础设施容器，保留数据卷
+./stop-infra.sh --purge     # 连 clickhouse/postgres 数据卷一起删
 ./start-memory-core.sh      # 单启 core
 ./start-memory-hub.sh       # 单启 hub
 ./start-proxy.sh            # 单启 proxy
@@ -145,11 +209,12 @@ cd deploy/global-images
 ### 4.2 健康检查
 
 ```bash
-docker ps                   # 三个容器都应为 (healthy)
-curl -fsS http://localhost:8420/health
-curl -fsS http://localhost:8125/health
-curl -fsS http://localhost:8424/health
-curl -fsS http://localhost:8096/health
+docker ps                   # 核心容器应 healthy
+curl -fsS http://localhost:28420/health   # memory-core
+curl -fsS http://localhost:28125/health   # memory-hub
+curl -fsS http://localhost:28424/health   # knowledge
+curl -fsS http://localhost:28096/health   # proxy
+curl -fsS http://localhost:23000/api/public/health   # langfuse
 ```
 
 ### 4.3 看日志
@@ -158,6 +223,10 @@ curl -fsS http://localhost:8096/health
 docker logs -f tdai-memory-core
 docker logs -f tdai-memory-hub
 docker logs -f tdai-proxy
+docker logs -f tdai-redis
+docker logs -f tdai-clickhouse
+docker logs -f tdai-postgres
+docker logs -f tdai-langfuse
 docker logs --since 10m tdai-proxy
 ```
 
@@ -169,19 +238,30 @@ docker logs tdai-memory-core | grep -E 'pipeline|packager|extraction|project'
 docker logs tdai-memory-hub | grep -E 'ERROR|WARN|404'
 ```
 
----
+### 4.4 可观测与运维入口
+
+| 入口 | 地址 | 说明 |
+|---|---|---|
+| TDAI Panel | `http://<新服务器IP>:28125` | 管理团队/Agent/Task/记忆/Team Notes |
+| Langfuse UI | `LANGFUSE_PUBLIC_URL` 配置的地址 | 查看 LLM Trace/耗时/输入输出 |
+| ClickHouse Web UI | `http://<新服务器IP>:28123/play` | 查看/查询用量日志（用户/密码在 `.env`） |
+| Redis GUI | `<新服务器IP>:26379` | RESP.app 等客户端连接，密码在 `.env` |
+| Proxy 日志 | `docker logs -f tdai-proxy` | 请求转发、耗时、错误 |
+| Proxy 文件日志 | 容器内 `/data/tdai-memory-proxy/logs/proxy.log` | 历史文件日志 |
 
 ## 5. 数据持久化与服务器独立性
 
-### 5.1 三个 named volume
+### 5.1 named volumes
 
 | Volume | 挂载到 | 内容 |
 |---|---|---|
 | `tdai-memory-core-data` | `/data/tdai-memory` | L0-L3、SQLite、JSONL、project/topics、checkpoint |
 | `tdai-panel-data` | `/data/knowledge` | Knowledge SQLite、Wiki、日志、panel 配置 |
 | `tdai-proxy-data` | `/data/tdai-memory-proxy` | proxy SQLite：sessions、hook_cache、tips_reminder_state |
+| `tdai-clickhouse-data` | `/var/lib/clickhouse` | ClickHouse 用量日志数据 |
+| `tdai-postgres-data` | `/var/lib/postgresql/data` | Langfuse 的 PostgreSQL 数据 |
 
-容器删除/重建、服务重启都不会丢；只有 `--purge` 或手动删 volume 才丢。
+容器删除/重建、服务重启都不会丢；只有 `--purge` 或手动删 volume 才丢。Redis 当前未挂持久化卷，仅作缓存/限流，容器删除后缓存数据会重置。
 
 ### 5.2 本机数据不会进镜像
 

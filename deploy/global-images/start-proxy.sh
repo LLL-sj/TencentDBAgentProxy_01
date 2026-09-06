@@ -129,7 +129,7 @@ upstream:
   defaultModel: "${PROXY_UPSTREAM_MODEL}"
 
 log:
-  file: ""
+  file: "${PROXY_LOG_FILE:-}"
   level: info
   backend: console
 
@@ -217,7 +217,32 @@ injection:
     - summary-tips
 
 redis:
-  enabled: false
+  enabled: $(bool ${REDIS_ENABLED:-0})
+  url: "${REDIS_URL:-}"
+  host: "${REDIS_HOST:-127.0.0.1}"
+  port: ${REDIS_PORT:-6379}
+  password: "${REDIS_PASSWORD:-}"
+  db: ${REDIS_DB:-0}
+  keyPrefix: "${REDIS_KEY_PREFIX:-cg:sess:}"
+  ttlSeconds: ${REDIS_TTL_SECONDS:-1800}
+
+langfuse:
+  enabled: $(bool ${LANGFUSE_ENABLED:-0})
+  host: "${LANGFUSE_HOST:-}"
+  publicKey: "${LANGFUSE_PUBLIC_KEY:-}"
+  secretKey: "${LANGFUSE_SECRET_KEY:-}"
+
+clickhouse:
+  enabled: $(bool ${CLICKHOUSE_ENABLED:-0})
+  url: "${CLICKHOUSE_URL:-}"
+  database: "${CLICKHOUSE_DATABASE:-context_proxy}"
+  table: "${CLICKHOUSE_TABLE:-usage_logs}"
+  rawTable: "${CLICKHOUSE_RAW_TABLE:-usage_raw}"
+  user: "${CLICKHOUSE_USER:-default}"
+  password: "${CLICKHOUSE_PASSWORD:-}"
+  flushIntervalMs: ${CLICKHOUSE_FLUSH_INTERVAL_MS:-5000}
+  flushThreshold: ${CLICKHOUSE_FLUSH_THRESHOLD:-50}
+  ttlDays: ${CLICKHOUSE_TTL_DAYS:-30}
 YAML
 
 info "启动 proxy (image=$PROXY_IMAGE, port=$PROXY_PORT, sourceMounts=$DEV_SOURCE_MOUNTS)"
