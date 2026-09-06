@@ -325,6 +325,26 @@ export interface L0PaginatedResult {
   total: number;
 }
 
+/** A single L0 session summary for panel session-list views. */
+export interface L0SessionSummary {
+  session_id: string;
+  /** Message count in this session. */
+  message_count: number;
+  /** Oldest recorded time in epoch ms, if available. */
+  first_recorded_at_ms?: number;
+  /** Newest recorded time in epoch ms, if available. */
+  last_recorded_at_ms?: number;
+  /** Newest message content, if available (best-effort). */
+  last_message?: string;
+}
+
+/** Result for listing L0 sessions grouped by session_id. */
+export interface L0SessionListResult {
+  items: L0SessionSummary[];
+  /** Total number of sessions matching filters. */
+  total: number;
+}
+
 /** Filter for v2 L1 paginated query (`/atomic/query`). */
 export interface L1CountFilter {
   /** Filter by memory type (episodic/persona/instruction). */
@@ -624,6 +644,12 @@ export interface IMemoryStore {
    * plus the total count of matching rows.
    */
   queryL0Paginated?(filter: L0PaginatedFilter): MaybePromise<L0PaginatedResult>;
+
+  /**
+   * List L0 sessions (grouped by session_id) within an isolation scope.
+   * Optional because not every backend can aggregate efficiently.
+   */
+  listL0Sessions?(filter: L0CountFilter & { limit: number; offset: number }): MaybePromise<L0SessionListResult>;
 
   /**
    * L1 paginated query for v2 API `/atomic/query`.

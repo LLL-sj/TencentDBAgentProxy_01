@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { Tag } from 'tea-component';
-import { chatMemoryApi, type ChatMemoryLayerItem } from '@/lib/teamApi';
+import { chatMemoryApi, type ChatMemoryLayerItem, type L0SessionSummary } from '@/lib/teamApi';
 import { projectApi, formatProjectError, type ProjectListResult, type ProjectTopicFile } from '@/lib/project-api';
 import { tipsApi, formatTipsError, TIP_STATUS_LABELS, type SummaryTipItem, type TipStatus } from '@/lib/tips-api';
 import type { MemoryBlock } from '@/pages/memory/ChatMemoryPage/components/types';
@@ -115,21 +115,30 @@ export function CodeMemoryDetail({
   const [chatData, setChatData] = useState<ChatLayerData>({ items: [], total: 0 });
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState('');
+  const [l0Sessions, setL0Sessions] = useState<L0SessionSummary[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState('');
+  const [l0SessionsLoading, setL0SessionsLoading] = useState(false);
+  const [l0MoreLoading, setL0MoreLoading] = useState(false);
 
   useEffect(() => {
     if (layer !== 'L0' && layer !== 'L1') return;
     setChatPage(0);
     setChatData({ items: [], total: 0 });
     setChatError('');
+    setL0Sessions([]);
+    setSelectedSessionId('');
+    setL0SessionsLoading(false);
+    setL0MoreLoading(false);
   }, [block.id, layer]);
 
+  // L1 保持原分页读取；L0 改为按当前 session 拉取。
   useEffect(() => {
-    if (layer !== 'L0' && layer !== 'L1') return;
+    if (layer !== 'L1') return;
     let cancelled = false;
     setChatLoading(true);
     setChatError('');
     chatMemoryApi
-      .layer(block.id, layer, CHAT_LAYER_PAGE_SIZE, chatPage * CHAT_LAYER_PAGE_SIZE, undefined, undefined, layer === 'L1' ? 'code' : undefined)
+      .layer(block.id, 'L1', CHAT_LAYER_PAGE_SIZE, chatPage * CHAT_LAYER_PAGE_SIZE, undefined, undefined, 'code')
       .then((res) => {
         if (cancelled) return;
         setChatData({ items: res.items, total: res.total });
@@ -144,6 +153,81 @@ export function CodeMemoryDetail({
       cancelled = true;
     };
   }, [block.id, layer, chatPage, t]);
+
+  // L0：先拉 session 列表，再默认加载最新 session 的第一页。
+  useEffect(() => {
+    if (layer !== 'L0') return;
+    let cancelled = false;
+    setChatData({ items: [], total: 0 });
+    setChatError('');
+    setL0Sessions([]);
+    setSelectedSessionId('');
+    setL0SessionsLoading(true);
+    setChatLoading(true);
+    chatMemoryApi
+      .l0Sessions(block.id)
+      .then((res) => {
+        if (cancelled) return;
+        setL0Sessions(res.items);
+        const first = res.items[0]?.session_id ?? '';
+        setSelectedSessionId(first);
+        if (!first) {
+          setChatData({ items: [], total: 0 });
+          setChatLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setChatError(err instanceof Error ? err.message : t('memory.notify.layerFailed'));
+      })
+      .finally(() => {
+        if (!cancelled) setL0SessionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [block.id, layer, t]);
+
+  useEffect(() => {
+    if (layer !== 'L0' || !selectedSessionId || l0SessionsLoading) return;
+    let cancelled = false;
+    setChatLoading(true);
+    setChatError('');
+    chatMemoryApi
+      .layer(block.id, 'L0', CHAT_LAYER_PAGE_SIZE, 0, undefined, undefined, undefined, selectedSessionId)
+      .then((res) => {
+        if (cancelled) return;
+        setChatData({ items: res.items, total: res.total });
+      })
+      .catch((err) => {
+        if (!cancelled) setChatError(err instanceof Error ? err.message : t('memory.notify.layerFailed'));
+      })
+      .finally(() => {
+        if (!cancelled) setChatLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [block.id, layer, selectedSessionId, l0SessionsLoading, t]);
+
+  async function handleCodeL0LoadMore() {
+    if (layer !== 'L0' || !selectedSessionId || l0MoreLoading || !chatData.items.length) return;
+    const lastItem = chatData.items[chatData.items.length - 1];
+    const beforeTs = lastItem?.created_at;
+    if (!beforeTs) return;
+    setL0MoreLoading(true);
+    try {
+      const res = await chatMemoryApi.layer(block.id, 'L0', CHAT_LAYER_PAGE_SIZE, 0, undefined, beforeTs, undefined, selectedSessionId);
+      setChatData((prev) => {
+        const existing = new Set(prev.items.map((m) => m.id));
+        const more = res.items.filter((m) => !existing.has(m.id));
+        return { items: [...prev.items, ...more], total: prev.total };
+      });
+    } catch (err) {
+      setChatError(err instanceof Error ? err.message : t('memory.notify.layerFailed'));
+    } finally {
+      setL0MoreLoading(false);
+    }
+  }
 
   // ── L0.5（复用 tips/list + tips/get）─────────────────────────
   const [tips, setTips] = useState<SummaryTipItem[]>([]);
@@ -280,6 +364,11 @@ export function CodeMemoryDetail({
             page={safeChatPage}
             pageCount={chatPageCount}
             onPageChange={setChatPage}
+            l0Sessions={l0Sessions}
+            selectedSessionId={selectedSessionId}
+            onL0SessionChange={setSelectedSessionId}
+            onL0LoadMore={handleCodeL0LoadMore}
+            l0MoreLoading={l0MoreLoading}
           />
         ) : null}
 
@@ -342,6 +431,11 @@ function ChatLayerView({
   page,
   pageCount,
   onPageChange,
+  l0Sessions,
+  selectedSessionId,
+  onL0SessionChange,
+  onL0LoadMore,
+  l0MoreLoading,
 }: {
   layer: 'L0' | 'L1';
   data: ChatLayerData;
@@ -350,37 +444,73 @@ function ChatLayerView({
   page: number;
   pageCount: number;
   onPageChange: (page: number) => void;
+  l0Sessions?: L0SessionSummary[];
+  selectedSessionId?: string;
+  onL0SessionChange?: (sessionId: string) => void;
+  onL0LoadMore?: () => void;
+  l0MoreLoading?: boolean;
 }) {
   const { t } = useTranslation();
   if (loading) return <LayerLoading />;
   if (error) return <LayerError message={error} />;
-  if (data.items.length === 0) {
-    return <div className="_memory-detail-empty">{t('memory.detail.emptyLayer', { layer })}</div>;
-  }
 
   if (layer === 'L0') {
+    const hasMore = (data.items.length < data.total && data.total > 0);
     return (
       <div className="_code-memory-l0-list">
-        {[...data.items].reverse().map((msg, idx) => {
-          const role = extractRole(msg.role || msg.title || '');
-          const cleanBody = stripAtMention(msg.body);
-          const roleTone = role === 'user' ? 'user' : role === 'system' ? 'system' : 'assistant';
-          const time = formatDisplayTime(msg.created_at);
-          return (
-            <div key={msg.id || idx} className={`_memory-detail-l0-row _memory-detail-l0-row--${roleTone}`}>
-              <div className="_memory-detail-l0-bubble">
-                <div className="_memory-detail-l0-bubble-head">
-                  <span className={`_memory-detail-l0-role _memory-detail-l0-role--${roleTone}`}>{role.toUpperCase()}</span>
-                  {time && <span className="_memory-detail-l0-time" title={msg.created_at}>{time}</span>}
+        {(l0Sessions?.length ?? 0) > 0 && (
+          <div className="_code-memory-l0-sessions">
+            {l0Sessions?.map((sess) => (
+              <button
+                key={sess.session_id}
+                type="button"
+                className={`_code-memory-l0-session-btn${selectedSessionId === sess.session_id ? ' _code-memory-l0-session-btn--active' : ''}`}
+                onClick={() => onL0SessionChange?.(sess.session_id)}
+              >
+                <span title={sess.session_id}>{sess.session_id || t('memory.detail.defaultSession')}</span>
+                <em>{sess.message_count}</em>
+              </button>
+            ))}
+          </div>
+        )}
+        {data.items.length === 0 ? (
+          <div className="_memory-detail-empty">{t('memory.detail.noL0')}</div>
+        ) : (
+          [...data.items].reverse().map((msg, idx) => {
+            const role = extractRole(msg.role || msg.title || '');
+            const cleanBody = stripAtMention(msg.body);
+            const roleTone = role === 'user' ? 'user' : role === 'system' ? 'system' : 'assistant';
+            const time = formatDisplayTime(msg.created_at);
+            return (
+              <div key={msg.id || idx} className={`_memory-detail-l0-row _memory-detail-l0-row--${roleTone}`}>
+                <div className="_memory-detail-l0-bubble">
+                  <div className="_memory-detail-l0-bubble-head">
+                    <span className={`_memory-detail-l0-role _memory-detail-l0-role--${roleTone}`}>{role.toUpperCase()}</span>
+                    {time && <span className="_memory-detail-l0-time" title={msg.created_at}>{time}</span>}
+                  </div>
+                  <pre className="_memory-detail-l0-body">{cleanBody}</pre>
                 </div>
-                <pre className="_memory-detail-l0-body">{cleanBody}</pre>
               </div>
-            </div>
-          );
-        })}
-        <LayerPager page={page} pageCount={pageCount} onPageChange={onPageChange} />
+            );
+          })
+        )}
+        {hasMore && (
+          <div className="_memory-detail-l0-more">
+            {l0MoreLoading ? (
+              <span className="_memory-detail-l0-more-text">{t('memory.detail.loading')}</span>
+            ) : (
+              <button type="button" className="_memory-detail-l0-more-btn" onClick={onL0LoadMore}>
+                {t('memory.detail.loadMore')}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
+  }
+
+  if (data.items.length === 0) {
+    return <div className="_memory-detail-empty">{t('memory.detail.emptyLayer', { layer })}</div>;
   }
 
   return (

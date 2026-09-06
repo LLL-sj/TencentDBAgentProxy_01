@@ -219,6 +219,50 @@
 }
 
 /* ===== L0 对话原文（聊天气泡式） ===== */
+/* Session 列表：横向胶囊按钮，显示 session id 和消息数 */
+._memory-detail-l0-sessions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--tea-color-border-default);
+  margin-bottom: 10px;
+}
+
+._memory-detail-l0-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 8px;
+  border: 1px solid var(--tea-color-border-default);
+  border-radius: 4px;
+  background: var(--tea-color-bg-2);
+  color: var(--tea-color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+._memory-detail-l0-session-btn:hover {
+  border-color: var(--tea-color-border-brand-default);
+}
+
+._memory-detail-l0-session-btn--active {
+  border-color: var(--tea-color-border-brand-default);
+  background: var(--tea-color-bg-3);
+  color: var(--tea-color-text-brand-default);
+}
+
+._memory-detail-l0-session-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+._memory-detail-l0-session-count {
+  opacity: 0.8;
+}
+
 /* 撑满层内容区剩余高度；视口高度兜底封顶，避免左栏很短时整页被拉得过长 */
 ._memory-detail-l0-scroll {
   flex: 1;
@@ -657,4 +701,24 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+._memory-detail-atomic-edit-btn,
+._memory-detail-atomic-delete-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--tea-color-text-brand-default);
+}
+
+._memory-detail-atomic-delete-btn {
+  color: var(--tea-color-danger-6, #e54545);
+}
+
+._memory-detail-edit-textarea {
+  font-family: var(--tea-font-family-mono, monospace);
+  font-size: 13px;
 }

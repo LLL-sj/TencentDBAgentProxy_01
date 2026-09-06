@@ -1,19 +1,31 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { type MemoryLayer, type MemoryBlock, type AtomicItem } from './types';
+import type { L0SessionSummary } from '@/lib/teamApi';
 import { useLayers } from './constants';
 import { getLayerCount, stripAtMention, extractRole, formatDisplayTime } from './utils';
 import { MarkdownView } from '@/components/MarkdownView';
 import { AppIcon, UsergroupIcon, ChevronDownIcon } from 'tea-icons-react';
+import { Button, Input, Modal } from 'tea-component';
+import { chatMemoryApi } from '@/lib/teamApi';
+import { tea } from '@/lib/tea-bridge';
 
-export function BlockDetail({ block, layer, onLayerChange, agentLabel, layerPage, layerPageSize, layerLoading, onLayerPageChange, onLayerItemLoad, layerItemLoadingId, onL0LoadMore, l0MoreLoading }: {
+export function BlockDetail({ block, layer, onLayerChange, agentLabel, layerPage, layerPageSize, layerLoading, onLayerPageChange, onLayerItemLoad, layerItemLoadingId, onL0LoadMore, l0MoreLoading, l0Sessions = [], selectedSessionId = '', onL0SessionChange, onLayerMutated }: {
   block: MemoryBlock; layer: MemoryLayer; onLayerChange: (l: MemoryLayer) => void; agentLabel: (id?: string) => string;
   layerPage: number; layerPageSize: number; layerLoading: boolean; onLayerPageChange: (page: number) => void;
   onLayerItemLoad?: (itemId: string) => void; layerItemLoadingId?: string | null;
   /** L0 加载更多（追加更早的对话）；未传则不展示加载入口 */
   onL0LoadMore?: () => void; l0MoreLoading?: boolean;
+  /** L0 session 列表 + 当前选中 session */
+  l0Sessions?: L0SessionSummary[];
+  selectedSessionId?: string;
+  onL0SessionChange?: (sessionId: string) => void;
+  /** L2/L3 编辑/删除成功后触发刷新当前层 */
+  onLayerMutated?: (l: MemoryLayer) => void;
 }) {
   const { t } = useTranslation();
+  const [editTarget, setEditTarget] = useState<{ layer: 'L2' | 'L3'; id: string; content: string } | null>(null);
+  const [saving, setSaving] = useState(false);
   const LAYERS = useLayers();
   const total = getLayerCount(block, layer);
   const pageCount = Math.max(1, Math.ceil(total / layerPageSize));
@@ -71,6 +83,43 @@ export function BlockDetail({ block, layer, onLayerChange, agentLabel, layerPage
       triggerL0LoadMore();
     }
     l0PrevScrollTopRef.current = el.scrollTop;
+  }
+
+  async function saveEdit() {
+    if (!editTarget) return;
+    setSaving(true);
+    try {
+      if (editTarget.layer === 'L2') {
+        await chatMemoryApi.l2Write(block.id, editTarget.id, editTarget.content);
+        tea.notify.success(t('memory.notify.l2Saved'));
+      } else {
+        await chatMemoryApi.l3Update(block.id, editTarget.content);
+        tea.notify.success(t('memory.notify.l3Saved'));
+      }
+      setEditTarget(null);
+      onLayerMutated?.(editTarget.layer);
+    } catch (e: any) {
+      tea.notify.error(e?.message || t('memory.notify.saveFailed'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteL2(path: string) {
+    const ok = await tea.confirm({
+      message: t('memory.confirm.deleteL2'),
+      description: path,
+      okText: t('common.confirm'),
+      cancelText: t('common.cancel'),
+    });
+    if (!ok) return;
+    try {
+      await chatMemoryApi.l2Delete(block.id, path);
+      tea.notify.success(t('memory.notify.l2Deleted'));
+      onLayerMutated?.('L2');
+    } catch (e: any) {
+      tea.notify.error(e?.message || t('memory.notify.deleteFailed'));
+    }
   }
 
   return (
@@ -132,7 +181,25 @@ export function BlockDetail({ block, layer, onLayerChange, agentLabel, layerPage
           </div>
         ) : layer === 'L0' ? (
           block.layers.L0.length > 0 ? (
-            <div className="_memory-detail-l0-scroll" ref={l0ScrollRef} onScroll={handleL0Scroll}>
+            <>
+              {l0Sessions.length > 0 && (
+                <div className="_memory-detail-l0-sessions">
+                  {l0Sessions.map((sess) => (
+                    <button
+                      key={sess.session_id}
+                      type="button"
+                      className={`_memory-detail-l0-session-btn${selectedSessionId === sess.session_id ? ' _memory-detail-l0-session-btn--active' : ''}`}
+                      onClick={() => onL0SessionChange?.(sess.session_id)}
+                    >
+                      <span className="_memory-detail-l0-session-id" title={sess.session_id}>
+                        {sess.session_id || t('memory.detail.defaultSession')}
+                      </span>
+                      <span className="_memory-detail-l0-session-count">{sess.message_count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="_memory-detail-l0-scroll" ref={l0ScrollRef} onScroll={handleL0Scroll}>
               {/* 顶部：加载更早的对话（滚动到顶部自动触发，也可点击） */}
               {(l0HasMore || l0MoreLoading || block.layers.L0.length > layerPageSize) && (
                 <div className="_memory-detail-l0-more">
@@ -171,12 +238,25 @@ export function BlockDetail({ block, layer, onLayerChange, agentLabel, layerPage
                 );
               })}
               </div>
-            </div>
+              </div>
+            </>
           ) : (
             <div className="_memory-detail-empty">{t('memory.detail.noL0')}</div>
           )
         ) : (
-          <AtomicList layer={layer} items={block.layers[layer]} onLoadItem={onLayerItemLoad} loadingItemId={layerItemLoadingId} />
+          <AtomicList
+            layer={layer}
+            items={block.layers[layer]}
+            onLoadItem={onLayerItemLoad}
+            loadingItemId={layerItemLoadingId}
+            onEditItem={(item) => {
+              if (layer !== 'L2' && layer !== 'L3') return;
+              setEditTarget({ layer, id: item.id, content: item.body });
+            }}
+            onDeleteItem={(item) => {
+              if (layer === 'L2') void deleteL2(item.id);
+            }}
+          />
         )}
         {showPager && (
           <div className="_memory-detail-pager">
@@ -188,11 +268,43 @@ export function BlockDetail({ block, layer, onLayerChange, agentLabel, layerPage
           </div>
         )}
       </div>
+
+      {editTarget && (
+        <Modal
+          visible
+          caption={editTarget.layer === 'L2' ? editTarget.id : t('memory.detail.l3Edit')}
+          size="xl"
+          onClose={() => setEditTarget(null)}
+        >
+          <Modal.Body>
+            <Input.TextArea
+              size="full"
+              className="_memory-detail-edit-textarea"
+              value={editTarget.content}
+              onChange={(v) => setEditTarget((cur) => (cur ? { ...cur, content: v } : cur))}
+              rows={14}
+            />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button type="primary" loading={saving} onClick={() => void saveEdit()}>
+              {t('common.save')}
+            </Button>
+            <Button onClick={() => setEditTarget(null)}>{t('common.cancel')}</Button>
+          </Modal.Footer>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function AtomicList({ layer, items, onLoadItem, loadingItemId }: { layer: MemoryLayer; items: AtomicItem[]; onLoadItem?: (itemId: string) => void; loadingItemId?: string | null; }) {
+function AtomicList({ layer, items, onLoadItem, loadingItemId, onEditItem, onDeleteItem }: {
+  layer: MemoryLayer;
+  items: AtomicItem[];
+  onLoadItem?: (itemId: string) => void;
+  loadingItemId?: string | null;
+  onEditItem?: (item: AtomicItem) => void;
+  onDeleteItem?: (item: AtomicItem) => void;
+}) {
   const { t } = useTranslation();
   const LAYERS = useLayers();
   const meta = LAYERS.find((l) => l.id === layer)!;
@@ -213,6 +325,32 @@ function AtomicList({ layer, items, onLoadItem, loadingItemId }: { layer: Memory
             <span className="_memory-detail-atomic-head-right">
               {loading && <span className="_memory-detail-atomic-loading">{t('memory.detail.loading')}</span>}
               {time && <span className="_memory-detail-atomic-time" title={it.created_at}>{time}</span>}
+              {(layer === 'L2' || layer === 'L3') && (
+                <>
+                  <button
+                    type="button"
+                    className="_memory-detail-atomic-edit-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEditItem?.(it);
+                    }}
+                  >
+                    {t('common.edit')}
+                  </button>
+                  {layer === 'L2' && (
+                    <button
+                      type="button"
+                      className="_memory-detail-atomic-delete-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteItem?.(it);
+                      }}
+                    >
+                      {t('common.delete')}
+                    </button>
+                  )}
+                </>
+              )}
               {isL2 && (
                 <ChevronDownIcon
                   size={12}

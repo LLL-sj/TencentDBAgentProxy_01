@@ -30,6 +30,7 @@ import type {
   StoreLogger,
   L0PaginatedFilter,
   L0PaginatedResult,
+  L0SessionListResult,
   L0CountFilter,
   L1CountFilter,
   L1PaginatedFilter,
@@ -1739,6 +1740,75 @@ export class TcvdbMemoryStore implements IMemoryStore {
     } catch (err) {
       this.logger?.warn(`${TAG} [L0-queryPaginated] FAILED: ${err instanceof Error ? err.message : String(err)}`);
       return { rows: [], total: 0 };
+    }
+  }
+
+  /**
+   * List L0 sessions grouped by session_id for the panel session view.
+   * TCVDB has no SQL GROUP BY, so this scans matching docs and aggregates in memory.
+   * The scan is intentionally uncapped to give complete session summaries for a
+   * (team, agent, user) scope; if data volume becomes a concern, this should be
+   * replaced by a native aggregation/rollup or a dedicated session metadata table.
+   */
+  async listL0Sessions(filter: L0CountFilter & { limit: number; offset: number }): Promise<L0SessionListResult> {
+    await this._ensureInit();
+    if (this.degraded) return { items: [], total: 0 };
+
+    try {
+      const conditions: string[] = [];
+      if (filter.sessionId) {
+        const sid = escapeFilterString(filter.sessionId);
+        conditions.push(`(session_key = "${sid}" or session_id = "${sid}")`);
+      }
+      conditions.push(...buildIsolationConditions({
+        teamId: filter.teamId,
+        userId: filter.userId,
+        agentId: filter.agentId,
+        taskId: filter.taskId,
+      }));
+      if (filter.timeStartMs !== undefined) {
+        conditions.push(`recorded_at_ms >= ${filter.timeStartMs}`);
+      }
+      if (filter.timeEndMs !== undefined) {
+        conditions.push(`recorded_at_ms <= ${filter.timeEndMs}`);
+      }
+      const filterExpr = joinFilter(conditions);
+
+      const docs = await this._queryAllDocs(
+        this.l0Collection,
+        filterExpr,
+        ["session_id", "recorded_at_ms", "message_text"],
+      );
+
+      const map = new Map<string, { count: number; first: number; last: number; lastMessage?: string }>();
+      for (const d of docs) {
+        const sid = String(d.session_id ?? "").trim() || DEFAULT_ISOLATION_ID;
+        const ms = Number(d.recorded_at_ms ?? 0);
+        const msg = typeof d.message_text === "string" ? d.message_text : "";
+        const cur = map.get(sid) ?? { count: 0, first: ms || Infinity, last: ms || 0 };
+        cur.count += 1;
+        if (ms && ms < cur.first) cur.first = ms;
+        if (ms && ms > cur.last) { cur.last = ms; cur.lastMessage = msg; }
+        map.set(sid, cur);
+      }
+
+      const all = [...map.entries()].map(([session_id, v]) => ({
+        session_id,
+        message_count: v.count,
+        first_recorded_at_ms: Number.isFinite(v.first) ? v.first : undefined,
+        last_recorded_at_ms: v.last || undefined,
+        ...(v.lastMessage !== undefined ? { last_message: v.lastMessage.slice(0, 120) } : {}),
+      })).sort((a, b) => (b.last_recorded_at_ms ?? 0) - (a.last_recorded_at_ms ?? 0));
+
+      const offset = Math.max(0, filter.offset || 0);
+      const limit = Math.max(1, Math.min(filter.limit || 20, 500));
+      return {
+        items: all.slice(offset, offset + limit),
+        total: all.length,
+      };
+    } catch (err) {
+      this.logger?.warn(`${TAG} [L0-listSessions] FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      return { items: [], total: 0 };
     }
   }
 

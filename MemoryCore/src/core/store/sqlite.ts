@@ -41,6 +41,7 @@ import type {
   L0CountFilter,
   L0PaginatedFilter,
   L0PaginatedResult,
+  L0SessionListResult,
   L1CountFilter,
   L1PaginatedFilter,
   L1PaginatedResult,
@@ -2536,6 +2537,83 @@ export class VectorStore implements IMemoryStore {
     } catch (err) {
       this.logger?.warn(`[sqlite] queryL0Paginated failed: ${err instanceof Error ? err.message : String(err)}`);
       return { rows: [], total: 0 };
+    }
+  }
+
+  /**
+   * List L0 sessions grouped by session_id for the panel session view.
+   * SQLite supports GROUP BY and window-free aggregates efficiently.
+   */
+  listL0Sessions(filter: L0CountFilter & { limit: number; offset: number }): L0SessionListResult {
+    if (this.degraded) return { items: [], total: 0 };
+    try {
+      const conditions: string[] = [];
+      const params: SQLInputValue[] = [];
+
+      if (filter.sessionId) {
+        conditions.push("(session_key = ? OR session_id = ?)");
+        params.push(filter.sessionId, filter.sessionId);
+      }
+      if (filter.teamId !== undefined) {
+        conditions.push("team_id = ?");
+        params.push(filter.teamId);
+      }
+      if (filter.userId !== undefined) {
+        conditions.push("user_id = ?");
+        params.push(filter.userId);
+      }
+      if (filter.agentId !== undefined) {
+        conditions.push("agent_id = ?");
+        params.push(filter.agentId);
+      }
+      if (filter.taskId !== undefined) {
+        conditions.push("task_id = ?");
+        params.push(filter.taskId);
+      }
+      if (filter.timeStartMs !== undefined) {
+        conditions.push("timestamp >= ?");
+        params.push(filter.timeStartMs);
+      }
+      if (filter.timeEndMs !== undefined) {
+        conditions.push("timestamp <= ?");
+        params.push(filter.timeEndMs);
+      }
+
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      const countRow = this.db
+        .prepare(`SELECT COUNT(DISTINCT session_id) AS cnt FROM l0_conversations ${where}`)
+        .get(...params) as { cnt: number } | undefined;
+      const total = countRow?.cnt ?? 0;
+
+      // SQLite allows aliasing aggregate expressions in SELECT/ORDER BY.
+      const rows = this.db
+        .prepare(`SELECT session_id,
+            COUNT(*) AS message_count,
+            MIN(recorded_at_ms) AS first_recorded_at_ms,
+            MAX(recorded_at_ms) AS last_recorded_at_ms
+          FROM l0_conversations ${where}
+          GROUP BY session_id
+          ORDER BY last_recorded_at_ms DESC
+          LIMIT ? OFFSET ?`)
+        .all(...params, Math.max(1, Math.min(filter.limit || 20, 500)), Math.max(0, filter.offset || 0)) as Array<{
+          session_id: string;
+          message_count: number;
+          first_recorded_at_ms: number | null;
+          last_recorded_at_ms: number | null;
+        }>;
+
+      return {
+        items: rows.map((r) => ({
+          session_id: r.session_id,
+          message_count: Number(r.message_count ?? 0),
+          first_recorded_at_ms: r.first_recorded_at_ms ?? undefined,
+          last_recorded_at_ms: r.last_recorded_at_ms ?? undefined,
+        })),
+        total,
+      };
+    } catch (err) {
+      this.logger?.warn(`${TAG} [L0-listSessions] failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      return { items: [], total: 0 };
     }
   }
 

@@ -17,7 +17,7 @@ import { AppIcon, UsergroupIcon, UserIcon } from 'tea-icons-react';
 import { useAgents, useTeams } from '@/services';
 import { readAuth } from '@/components/LoginGate';
 import { tea } from '@/lib/tea-bridge';
-import { chatMemoryApi, type ChatMemoryBlock, type ChatMemoryLayerItem } from '@/lib/teamApi';
+import { chatMemoryApi, type ChatMemoryBlock, type ChatMemoryLayerItem, type L0SessionSummary } from '@/lib/teamApi';
 import { type MemoryBlock, type MemoryLayer, type ScopeTab } from './types';
 import { useScopeTabLabels } from './constants';
 
@@ -69,7 +69,11 @@ export default function ChatMemoryPanel(
   const [layerPages, setLayerPages] = useState<
     Record<string, Partial<Record<MemoryLayer, number>>>
   >({});
+  const [l0Sessions, setL0Sessions] = useState<L0SessionSummary[]>([]);
+  const [l0SessionsLoading, setL0SessionsLoading] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState('');
   const [layerLoading, setLayerLoading] = useState(false);
+  const [layerRefreshKey, setLayerRefreshKey] = useState(0);
   const [layerItemLoadingId, setLayerItemLoadingId] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [showAllocate, setShowAllocate] = useState(false);
@@ -239,15 +243,53 @@ export default function ChatMemoryPanel(
     });
   }, [selected?.id]);
 
+  // L0 session 列表：进入 L0 时先拉当前 block/agent 的 session 摘要。
+  useEffect(() => {
+    if (!selected?.id || layer !== 'L0') {
+      setL0Sessions([]);
+      setSelectedSessionId('');
+      setL0SessionsLoading(false);
+      setLayerLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setL0Sessions([]);
+    setSelectedSessionId('');
+    setL0SessionsLoading(true);
+    setLayerLoading(true);
+    chatMemoryApi
+      .l0Sessions(selected.id)
+      .then((res) => {
+        if (cancelled) return;
+        setL0Sessions(res.items);
+        setSelectedSessionId(res.items[0]?.session_id ?? '');
+      })
+      .catch((e: any) => {
+        if (!cancelled) tea.notify.error(e?.message || t('memory.notify.layerFailed'));
+      })
+      .finally(() => {
+        if (!cancelled) setL0SessionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id, layer, t]);
+
   useEffect(() => {
     if (!selected?.id) {
       setLayerLoading(false);
       return;
     }
+    // L0 等待 session 列表加载完成后再请求消息；没有 session 时显示空。
+    if (layer === 'L0' && (l0SessionsLoading || l0Sessions.length === 0)) {
+      setLayerLoading(false);
+      return;
+    }
     let cancelled = false;
     setLayerLoading(true);
+    const activeSessionId = layer === 'L0' ? selectedSessionId : undefined;
     chatMemoryApi
-      .layer(selected.id, layer, pageSize, layerPage * pageSize, undefined, undefined, layer === 'L1' ? 'chat' : undefined)
+      .layer(selected.id, layer, pageSize, layerPage * pageSize, undefined, undefined, layer === 'L1' ? 'chat' : undefined, activeSessionId)
       .then((res) => {
         if (cancelled) return;
         setBlocks((prev) =>
@@ -275,7 +317,7 @@ export default function ChatMemoryPanel(
     return () => {
       cancelled = true;
     };
-  }, [selected?.id, layer, layerPage, pageSize, t]);
+  }, [selected?.id, layer, layerPage, pageSize, t, l0SessionsLoading, l0Sessions.length, selectedSessionId, layerRefreshKey]);
 
   const handleLayerPageChange = useCallback(
     (nextPage: number) => {
@@ -295,7 +337,7 @@ export default function ChatMemoryPanel(
   // 降为 O(limit)。数组保持后端的新→旧顺序，渲染层再反转为旧→新，追加项出现在顶部。
   const [l0MoreLoading, setL0MoreLoading] = useState(false);
   const handleL0LoadMore = useCallback(async () => {
-    if (!selected?.id || layer !== 'L0' || l0MoreLoading) return;
+    if (!selected?.id || layer !== 'L0' || l0MoreLoading || !selectedSessionId) return;
     const items = selected.layers.L0;
     const total = selected.layerCounts.L0 ?? items.length;
     if (items.length >= total) return;
@@ -306,7 +348,7 @@ export default function ChatMemoryPanel(
     try {
       // beforeTs 有值时 offset 传 0（后端按 time_end 过滤）；首屏无 beforeTs 时走 offset=0
       const res = await chatMemoryApi.layer(
-        selected.id, 'L0', pageSize, 0, undefined, beforeTs,
+        selected.id, 'L0', pageSize, 0, undefined, beforeTs, undefined, selectedSessionId,
       );
       setBlocks((prev) =>
         prev.map((b) => {
@@ -327,7 +369,7 @@ export default function ChatMemoryPanel(
     } finally {
       setL0MoreLoading(false);
     }
-  }, [selected, layer, l0MoreLoading, pageSize, t]);
+  }, [selected, layer, l0MoreLoading, pageSize, selectedSessionId, t]);
 
   const handleLayerItemLoad = useCallback(
     async (itemId: string) => {
@@ -650,6 +692,10 @@ export default function ChatMemoryPanel(
                 layerItemLoadingId={layerItemLoadingId}
                 onL0LoadMore={handleL0LoadMore}
                 l0MoreLoading={l0MoreLoading}
+                l0Sessions={l0Sessions}
+                selectedSessionId={selectedSessionId}
+                onL0SessionChange={setSelectedSessionId}
+                onLayerMutated={() => setLayerRefreshKey((k) => k + 1)}
               />
             )
           }

@@ -457,6 +457,7 @@ export default function SkillsPanel({
           <SkillDetailPane
             skillName={selectedPersonalAsset?.name ?? null}
             skillId={selectedPersonalAsset?.asset_id}
+            onChanged={() => setPersonalRefreshKey((k) => k + 1)}
           />
         </section>
       </div>
@@ -559,7 +560,11 @@ export default function SkillsPanel({
           />
         }
         detail={
-          <SkillDetailPane skillName={selectedSkill?.name ?? null} skillId={selectedSkill?.skill_id} />
+          <SkillDetailPane
+            skillName={selectedSkill?.name ?? null}
+            skillId={selectedSkill?.skill_id}
+            onChanged={() => void refresh()}
+          />
         }
       />
       )}

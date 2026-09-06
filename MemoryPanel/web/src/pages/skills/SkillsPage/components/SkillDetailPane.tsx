@@ -12,9 +12,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { Card, Modal, Text } from 'tea-component';
+import { Button, Card, Input, Modal, Text } from 'tea-component';
 import { MarkdownView } from '@/components/MarkdownView';
-import { getSkill, readSkillFile, type SkillDetail, type ReadFileResult } from '@/lib/skill-api';
+import { getSkill, readSkillFile, removeSkillFiles, writeSkillFiles, type SkillDetail, type ReadFileResult } from '@/lib/skill-api';
+import { getCurrentUser } from '@/lib/api/base';
+import { skillApi } from '@/lib/teamApi';
 import './skill-detail.css';
 
 interface FileTreeNode {
@@ -90,13 +92,17 @@ function FileTreeView(props: {
   );
 }
 
-export default function SkillDetailPane(props: { skillName: string | null; skillId?: string }) {
+export default function SkillDetailPane(props: { skillName: string | null; skillId?: string; onChanged?: () => void }) {
   const { t } = useTranslation();
   const [view, setView] = useState<SkillDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<ReadFileResult | null>(null);
   const [filePreviewLoading, setFilePreviewLoading] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
+  const [editContent, setEditContent] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [fileEditContent, setFileEditContent] = useState('');
 
   const skillId = props.skillId ?? '';
 
@@ -132,6 +138,7 @@ export default function SkillDetailPane(props: { skillName: string | null; skill
     try {
       const f = await readSkillFile({ skill_id: skillId, path, encoding: 'utf-8' });
       setFilePreview(f);
+      setFileEditContent(f.content);
     } catch (err) {
       setFilePreview({
         path,
@@ -141,8 +148,94 @@ export default function SkillDetailPane(props: { skillName: string | null; skill
         mime_type: 'text/plain',
         version: 0,
       });
+      setFileEditContent('');
     } finally {
       setFilePreviewLoading(false);
+    }
+  }
+
+  async function saveMain(): Promise<void> {
+    if (!currentView || !skillId) return;
+    setSaving(true);
+    try {
+      const updated = await skillApi.update(
+        currentView.team_id,
+        currentView.owner_agent_id,
+        skillId,
+        currentView.version,
+        editContent,
+      );
+      setView({ ...currentView, ...updated, content: editContent });
+      setShowEdit(false);
+      props.onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(): Promise<void> {
+    if (!currentView || !skillId) return;
+    const ok = window.confirm(t('skills.detail.confirmDelete') ?? `Delete skill ${currentView.name}?`);
+    if (!ok) return;
+    setSaving(true);
+    try {
+      await skillApi.delete(currentView.team_id, currentView.owner_agent_id, skillId, currentView.version);
+      setView(null);
+      props.onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveFile(): Promise<void> {
+    if (!currentView || !filePreview || !skillId) return;
+    setSaving(true);
+    try {
+      const me = await getCurrentUser();
+      const updated = await writeSkillFiles({
+        user_id: me.user_id,
+        team_id: currentView.team_id,
+        agent_id: currentView.owner_agent_id,
+        skill_id: skillId,
+        expected_version: currentView.version,
+        files: [{ path: filePreview.path, content: fileEditContent, encoding: 'utf-8' }],
+      });
+      setFilePreview({ ...filePreview, content: fileEditContent, size_bytes: fileEditContent.length });
+      setView({ ...currentView, ...updated });
+      props.onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeCurrentFile(): Promise<void> {
+    if (!currentView || !filePreview || !skillId) return;
+    const ok = window.confirm(t('skills.detail.confirmFileRemove') ?? `Remove file ${filePreview.path}?`);
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const me = await getCurrentUser();
+      const updated = await removeSkillFiles({
+        user_id: me.user_id,
+        team_id: currentView.team_id,
+        agent_id: currentView.owner_agent_id,
+        skill_id: skillId,
+        expected_version: currentView.version,
+        paths: [filePreview.path],
+      });
+      setFilePreview(null);
+      setView({ ...currentView, ...updated });
+      props.onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -160,9 +253,30 @@ export default function SkillDetailPane(props: { skillName: string | null; skill
     <Card className="_memory-skill-detail-card">
       <Card.Body className="_memory-skill-detail-body">
         <div className="_memory-skill-detail-head">
-          <div className="_memory-skill-detail-name">{props.skillName}</div>
-          {currentView?.description && (
-            <Text theme="weak" parent="div" className="_memory-skill-detail-desc">{currentView.description}</Text>
+          <div>
+            <div className="_memory-skill-detail-name">{props.skillName}</div>
+            {currentView?.description && (
+              <Text theme="weak" parent="div" className="_memory-skill-detail-desc">{currentView.description}</Text>
+            )}
+          </div>
+          {currentView && (
+            <div className="_memory-skill-detail-actions">
+              <Button
+                onClick={() => {
+                  setEditContent(currentView.content);
+                  setShowEdit(true);
+                }}
+              >
+                {t('common.edit')}
+              </Button>
+              <Button
+                type="error"
+                loading={saving}
+                onClick={() => void handleDelete()}
+              >
+                {t('common.delete')}
+              </Button>
+            </div>
           )}
         </div>
 
@@ -215,6 +329,30 @@ export default function SkillDetailPane(props: { skillName: string | null; skill
         )}
       </Card.Body>
 
+      {/* Edit SKILL.md modal */}
+      {showEdit && currentView && (
+        <Modal
+          visible
+          caption={`${t('common.edit')}: SKILL.md`}
+          size="xl"
+          onClose={() => setShowEdit(false)}
+        >
+          <Modal.Body>
+            <Input.TextArea
+              size="full"
+              className="_memory-skill-edit-textarea"
+              value={editContent}
+              onChange={setEditContent}
+              rows={18}
+            />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button type="primary" loading={saving} onClick={() => void saveMain()}>{t('common.save')}</Button>
+            <Button onClick={() => setShowEdit(false)}>{t('common.cancel')}</Button>
+          </Modal.Footer>
+        </Modal>
+      )}
+
       {/* Inline file-preview modal */}
       {filePreview && (
         <Modal visible caption={filePreview.path} size="xl" onClose={() => setFilePreview(null)}>
@@ -226,7 +364,23 @@ export default function SkillDetailPane(props: { skillName: string | null; skill
                 {t('skills.detail.binaryFile', { size: filePreview.size_bytes })}
               </Text>
             ) : (
-              <pre className="_memory-skill-file-content">{filePreview.content}</pre>
+              <>
+                <Input.TextArea
+                  size="full"
+                  className="_memory-skill-file-edit"
+                  value={fileEditContent}
+                  onChange={setFileEditContent}
+                  rows={18}
+                />
+                <div className="_memory-skill-file-actions">
+                  <Button type="primary" loading={saving} onClick={() => void saveFile()}>
+                    {t('common.save')}
+                  </Button>
+                  <Button type="error" loading={saving} onClick={() => void removeCurrentFile()}>
+                    {t('common.delete')}
+                  </Button>
+                </div>
+              </>
             )}
           </Modal.Body>
         </Modal>

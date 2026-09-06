@@ -309,3 +309,37 @@
     min-height: 0;
   }
 }
+/* Code L0 session selector */
+._code-memory-l0-sessions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--tea-color-border-default);
+  margin-bottom: 10px;
+}
+
+._code-memory-l0-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 8px;
+  border: 1px solid var(--tea-color-border-default);
+  border-radius: 4px;
+  background: var(--tea-color-bg-2);
+  color: var(--tea-color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+._code-memory-l0-session-btn:hover,
+._code-memory-l0-session-btn--active {
+  border-color: var(--tea-color-border-brand-default);
+  color: var(--tea-color-text-brand-default);
+}
+
+._code-memory-l0-session-btn em {
+  font-style: normal;
+  opacity: 0.8;
+}

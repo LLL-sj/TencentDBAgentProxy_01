@@ -108,3 +108,28 @@
   font-size: 12px;
   color: var(--tea-color-text-secondary);
 }
+._memory-skill-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+._memory-skill-detail-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+._memory-skill-edit-textarea,
+._memory-skill-file-edit {
+  font-family: var(--tea-font-family-mono, monospace);
+  font-size: 13px;
+}
+
+._memory-skill-file-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}

@@ -795,6 +795,7 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
     // 后端转换为 time_end（-1ms 排他）传给内核 /v3/conversation/query，offset 归零。
     // 这样 VDB 只需 filter recorded_at_ms < cursor 即可，不需要 skip 大量记录。
     const beforeTs = typeof body?.before_ts === 'string' ? body.before_ts.trim() : undefined;
+    const sessionId = typeof body?.session_id === 'string' ? body.session_id.trim() : undefined;
     const memoryMode = body?.memory_mode === 'chat' || body?.memory_mode === 'code'
       ? body.memory_mode
       : undefined;
@@ -889,16 +890,19 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
 
     try {
       if (layer === 'L0') {
-        // 关键：不传 session_id，tdai 会跨 session 聚合返 (team,user,agent) 全部消息
         // tdai 返 { messages: [...], total } 而不是 { items: [...] }
-        const { session_id: _drop, ...noSid } = idFields;
-        void _drop;
+        // 传 body.session_id 时只查该 session；不传则保持跨 session 聚合语义。
+        const l0Query: Record<string, unknown> = {
+          team_id: idFields.team_id,
+          agent_id: idFields.agent_id,
+          user_id: idFields.user_id,
+        };
+        if (sessionId) l0Query.session_id = sessionId;
 
         // 游标分页：before_ts → time_end（-1ms 排他）。
         // 内核 /v3/conversation/query 的 time_end 是 recorded_at_ms <= timeEndMs（含等），
         // 游标语义需要排他（< beforeTs），否则最后一条会被重复返回。
         // 减 1ms 把含等转为不含等。毫秒精度足够（同一 ms 的重复极少且前端有 id 去重兜底）。
-        const l0Query: Record<string, unknown> = { ...noSid };
         if (beforeTs) {
           const d = new Date(beforeTs);
           if (Number.isFinite(d.getTime())) {
@@ -923,6 +927,7 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
             layer,
             items: (data.messages ?? []).map((m) => ({
               id: m.id ?? '',
+              session_id: m.session_id ?? '',
               role: typeof m.role === 'string' ? m.role : 'msg',
               title: `${m.role ?? 'msg'} @ ${m.session_id ?? ''}`,
               body: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
@@ -1099,6 +1104,214 @@ export function registerChatMemoryRoutes(api: Hono, deps: PanelDeps): void {
       );
     }
   });
+
+  // ── 4.4.1 L0 session 列表（供 session 化 L0 视图）────────────────
+  api.post('/chat-memory/l0-sessions', validatePanelMetaHeaders(deps), async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const scope = await authorizeChatMemoryReadScope(deps, c, ctx, body);
+    if ('error' in scope) return scope.error;
+    const limit = typeof body?.limit === 'number' && body.limit > 0 && body.limit <= 200 ? body.limit : 50;
+    const offset = typeof body?.offset === 'number' && body.offset >= 0 ? body.offset : 0;
+    try {
+      const env = await deps.kernelHttp.postEnvelope<{
+        items?: Array<{ session_id: string; message_count: number; last_recorded_at_ms?: number; first_recorded_at_ms?: number; last_message?: string }>;
+        total?: number;
+      }>('/v3/conversation/sessions', {
+        team_id: scope.parsed.teamId,
+        agent_id: scope.parsed.agentId,
+        user_id: scope.ownerUserId,
+        limit,
+        offset,
+      }, scope.cred);
+      if (env.code !== 0) return respondEnvelope(c, env);
+      const data = (env.data as { items?: Array<{ session_id: string; message_count: number; last_recorded_at_ms?: number; first_recorded_at_ms?: number; last_message?: string }>; total?: number } | null) ?? { items: [] };
+      return respondEnvelope(c, okEnvelope(c, {
+        items: (data.items ?? []).map((s) => ({
+          session_id: s.session_id,
+          message_count: s.message_count ?? 0,
+          last_message_at: msToIso(s.last_recorded_at_ms),
+          first_message_at: msToIso(s.first_recorded_at_ms),
+          last_message: s.last_message,
+        })),
+        total: data.total ?? (data.items ?? []).length,
+        limit,
+        offset,
+      }));
+    } catch (err) {
+      return respondControlError(c, 502, `L0_SESSIONS_ERROR: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // ── 4.4.2 Chat L2/L3 编辑端点（仅资产 owner 可写）────────────────
+  api.post('/chat-memory/l2-write', validatePanelMetaHeaders(deps), async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const scope = await authorizeChatMemoryWriteScope(deps, c, ctx, body);
+    if ('error' in scope) return scope.error;
+    const path = typeof body?.path === 'string' ? body.path.trim() : '';
+    const content = typeof body?.content === 'string' ? body.content : '';
+    const summary = typeof body?.summary === 'string' ? body.summary : undefined;
+    if (!path || !content) return respondControlError(c, 400, 'MISSING_PATH_OR_CONTENT');
+    try {
+      const env = await deps.kernelHttp.postEnvelope('/v3/scenario/write', {
+        team_id: scope.parsed.teamId,
+        agent_id: scope.parsed.agentId,
+        user_id: scope.ownerUserId,
+        path,
+        content,
+        ...(summary !== undefined ? { summary } : {}),
+      }, scope.cred);
+      if (env.code !== 0) return respondEnvelope(c, env);
+      return respondEnvelope(c, env);
+    } catch (err) {
+      return respondControlError(c, 502, `L2_WRITE_ERROR: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  api.post('/chat-memory/l2-delete', validatePanelMetaHeaders(deps), async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const scope = await authorizeChatMemoryWriteScope(deps, c, ctx, body);
+    if ('error' in scope) return scope.error;
+    const path = typeof body?.path === 'string' ? body.path.trim() : '';
+    if (!path) return respondControlError(c, 400, 'MISSING_PATH');
+    try {
+      const env = await deps.kernelHttp.postEnvelope('/v3/scenario/rm', {
+        team_id: scope.parsed.teamId,
+        agent_id: scope.parsed.agentId,
+        user_id: scope.ownerUserId,
+        path,
+      }, scope.cred);
+      if (env.code !== 0) return respondEnvelope(c, env);
+      return respondEnvelope(c, env);
+    } catch (err) {
+      return respondControlError(c, 502, `L2_DELETE_ERROR: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  api.post('/chat-memory/l3-update', validatePanelMetaHeaders(deps), async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const scope = await authorizeChatMemoryWriteScope(deps, c, ctx, body);
+    if ('error' in scope) return scope.error;
+    const content = typeof body?.content === 'string' ? body.content : '';
+    if (!content) return respondControlError(c, 400, 'MISSING_CONTENT');
+    try {
+      const env = await deps.kernelHttp.postEnvelope('/v3/core/write', {
+        team_id: scope.parsed.teamId,
+        agent_id: scope.parsed.agentId,
+        user_id: scope.ownerUserId,
+        content,
+      }, scope.cred);
+      if (env.code !== 0) return respondEnvelope(c, env);
+      return respondEnvelope(c, env);
+    } catch (err) {
+      return respondControlError(c, 502, `L3_UPDATE_ERROR: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+}
+
+/**
+ * 可访问的 chat_memory 作用域：owner 数据面身份 + kernel 凭据。
+ */
+interface ChatMemoryScope {
+  parsed: { teamId: string; agentId: string };
+  ownerUserId: string;
+  asset: AssetRaw;
+  cred: ReturnType<typeof toKernelCredentials>;
+}
+
+/**
+ * 复用 /chat-memory/layer 的读权限：owner、team 可见、借入三者任一可读。
+ * 返回统一 scope 供 l0-sessions 等只读数据面端点使用。
+ */
+async function authorizeChatMemoryReadScope(
+  deps: PanelDeps,
+  c: import('hono').Context,
+  ctx: MetaCallContext,
+  body: Record<string, unknown>,
+): Promise<ChatMemoryScope | { error: Response }> {
+  const blockId = requiredBlockId(body);
+  if (!blockId) return { error: respondControlError(c, 400, 'MISSING_BLOCK_ID') };
+  const parsed = parseChatMemoryAssetId(blockId);
+  if (!parsed) return { error: respondControlError(c, 400, 'NOT_CHAT_MEMORY') };
+  const meUserId = await resolveCallerUserId(deps, ctx);
+  if (!meUserId) return { error: respondControlError(c, 401, 'INVALID_USER_KEY') };
+
+  const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: blockId }, ctx);
+  if (assetEnv.code === 404 || (assetEnv.code === 0 && !assetEnv.data)) {
+    return { error: respondControlError(c, 404, 'BLOCK_NOT_FOUND') };
+  }
+  if (assetEnv.code !== 0) return { error: respondEnvelope(c, assetEnv) };
+  const asset = assetEnv.data as AssetRaw;
+  if (asset.asset_type !== 'chat_memory') return { error: respondControlError(c, 400, 'NOT_CHAT_MEMORY') };
+
+  const isOwner = asset.owner_user_id === meUserId;
+  let allowed = isOwner;
+  if (!allowed && asset.visibility === 'team') {
+    allowed = await isTeamMember(deps, ctx, asset.team_id, meUserId);
+  }
+  if (!allowed && !isOwner) {
+    try {
+      const myAgentsEnv = await deps.metaKernel.invoke(
+        'agent/list',
+        { team_id: asset.team_id, status: 'active' },
+        ctx,
+      );
+      if (myAgentsEnv.code === 0) {
+        const myAgents = extractListItems<AgentRaw>(myAgentsEnv).filter((a) => a.owner_user_id === meUserId);
+        for (const a of myAgents) {
+          const bindEnv = await deps.metaKernel.invoke('agent-fixed-asset/list', { agent_id: a.agent_id }, ctx);
+          if (bindEnv.code !== 0) continue;
+          const bindings = extractListItems<FixedAssetRaw>(bindEnv);
+          if (bindings.some((b) => b.asset_id === blockId)) { allowed = true; break; }
+        }
+      }
+    } catch { /* fallthrough deny */ }
+  }
+  if (!allowed) return { error: respondControlError(c, 403, 'ASSET_NOT_ACCESSIBLE') };
+
+  return {
+    parsed,
+    ownerUserId: asset.owner_user_id,
+    asset,
+    cred: toKernelCredentials(ctx, { timeoutMs: 15_000 }),
+  };
+}
+
+/**
+ * 写权限：只有 chat_memory asset owner 才能修改该 agent 的 L2/L3 数据面。
+ * 借入/团队只读不允许写。
+ */
+async function authorizeChatMemoryWriteScope(
+  deps: PanelDeps,
+  c: import('hono').Context,
+  ctx: MetaCallContext,
+  body: Record<string, unknown>,
+): Promise<ChatMemoryScope | { error: Response }> {
+  const blockId = requiredBlockId(body);
+  if (!blockId) return { error: respondControlError(c, 400, 'MISSING_BLOCK_ID') };
+  const parsed = parseChatMemoryAssetId(blockId);
+  if (!parsed) return { error: respondControlError(c, 400, 'NOT_CHAT_MEMORY') };
+  const meUserId = await resolveCallerUserId(deps, ctx);
+  if (!meUserId) return { error: respondControlError(c, 401, 'INVALID_USER_KEY') };
+
+  const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: blockId }, ctx);
+  if (assetEnv.code === 404 || (assetEnv.code === 0 && !assetEnv.data)) {
+    return { error: respondControlError(c, 404, 'BLOCK_NOT_FOUND') };
+  }
+  if (assetEnv.code !== 0) return { error: respondEnvelope(c, assetEnv) };
+  const asset = assetEnv.data as AssetRaw;
+  if (asset.asset_type !== 'chat_memory') return { error: respondControlError(c, 400, 'NOT_CHAT_MEMORY') };
+  if (asset.owner_user_id !== meUserId) return { error: respondControlError(c, 403, 'ASSET_NOT_EDITABLE') };
+
+  return {
+    parsed,
+    ownerUserId: asset.owner_user_id,
+    asset,
+    cred: toKernelCredentials(ctx, { timeoutMs: 15_000 }),
+  };
 }
 
 /**

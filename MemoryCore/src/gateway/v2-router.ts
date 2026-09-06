@@ -164,6 +164,7 @@ const V3_ALLOWED_SUBPATHS = new Set<string>([
   "/conversation/search",
   "/conversation/delete",
   "/conversation/count",
+  "/conversation/sessions",
   "/atomic/update",
   "/atomic/query",
   "/atomic/search",
@@ -674,10 +675,12 @@ const routeTable: Record<string, RouteHandler> = {
   [`${V3_PREFIX}/tips/submit`]: handleTipsSubmit,
   [`${V3_PREFIX}/tips/list`]: handleTipsList,
   [`${V3_PREFIX}/tips/get`]: handleTipsGet,
-  // ── Code Memory v2 project memory (read-only) ──
+  // ── Code Memory v2 project memory (read/write) ──
   [`${V3_PREFIX}/project/list`]: handleProjectList,
   [`${V3_PREFIX}/project/read`]: handleProjectRead,
   [`${V3_PREFIX}/project/search`]: handleProjectSearch,
+  // ── L0 session summaries (Panel L0 session list) ──
+  [`${V3_PREFIX}/conversation/sessions`]: handleConversationSessions,
 };
 
 export async function handleV2Route(
@@ -1096,6 +1099,39 @@ async function handleConversationCount(body: unknown, _auth: V2AuthContext, requ
   if (time_start) { const ms = new Date(time_start).getTime(); filtered = filtered.filter((r) => r.timestamp >= ms); }
   if (time_end) { const ms = new Date(time_end).getTime(); filtered = filtered.filter((r) => r.timestamp <= ms); }
   return successEnvelope<CountData>({ total: filtered.length }, requestId);
+}
+
+async function handleConversationSessions(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const iso = deps.requestIsolation;
+  if (!iso?.teamId || !iso.agentId || !iso.userId) {
+    return errorEnvelope(422, "team_id, agent_id and user_id are required", requestId);
+  }
+  const raw = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const limit = typeof raw.limit === "number" && Number.isFinite(raw.limit)
+    ? Math.max(1, Math.min(Math.floor(raw.limit), 500))
+    : 20;
+  const offset = typeof raw.offset === "number" && Number.isFinite(raw.offset)
+    ? Math.max(0, Math.floor(raw.offset))
+    : 0;
+  const store = deps.getStore();
+  if (!store?.listL0Sessions) {
+    return errorEnvelope(501, "L0 session list is not supported by this store backend", requestId);
+  }
+  try {
+    const result = await store.listL0Sessions({
+      teamId: iso.teamId,
+      userId: iso.userId,
+      agentId: iso.agentId,
+      limit,
+      offset,
+    });
+    return successEnvelope(result, requestId);
+  } catch (err) {
+    deps.logger.warn?.(
+      `${TAG} [L0-listSessions] handler failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return errorEnvelope(500, "L0 session list failed", requestId);
+  }
 }
 
 async function handleConversationSearch(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {

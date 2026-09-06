@@ -24,6 +24,8 @@ export interface ChatMemoryBlock {
 /** 分层懒加载条目 */
 export interface ChatMemoryLayerItem {
   id: string;
+  /** L0 消息所属 session；其他层通常为空字符串。 */
+  session_id?: string;
   role?: string;
   title: string;
   body: string;
@@ -31,6 +33,15 @@ export interface ChatMemoryLayerItem {
   refs?: string[];
   /** 条目创建/记录时间（ISO8601），backend 从 recorded_at_ms / created_time_ms / updated_at 转换 */
   created_at?: string;
+}
+
+/** L0 session 摘要（面板 session 列表） */
+export interface L0SessionSummary {
+  session_id: string;
+  message_count: number;
+  last_message_at?: string;
+  first_message_at?: string;
+  last_message?: string;
 }
 
 const CHAT_MEMORY_PREFIX = '/api/v1/chat-memory';
@@ -76,12 +87,14 @@ export const chatMemoryApi = {
     path?: string,
     beforeTs?: string,
     memoryMode?: 'chat' | 'code',
+    sessionId?: string,
   ) =>
     chatMemoryCall<{ layer: string; items: ChatMemoryLayerItem[]; total: number; limit: number; offset: number }>('layer', {
       block_id: blockId, layer: l, limit, offset,
       ...(path ? { path } : {}),
       ...(beforeTs ? { before_ts: beforeTs } : {}),
       ...(l === 'L1' && memoryMode ? { memory_mode: memoryMode } : {}),
+      ...(l === 'L0' && sessionId ? { session_id: sessionId } : {}),
     }),
 
   /** 批量设置某个 agent 的固定 memory，后端会原子校验借入上限。 */
@@ -109,6 +122,30 @@ export const chatMemoryApi = {
   /** 切换资产可见范围 */
   patchScope: (blockId: string, scope: 'team' | 'private') =>
     chatMemoryCall<{ updated: boolean; id: string; scope: string }>('patch-scope', { block_id: blockId, scope }),
+
+  /** L0 session 列表（面板 session 化展示） */
+  l0Sessions: (blockId: string, limit = 50, offset = 0) =>
+    chatMemoryCall<{ items: L0SessionSummary[]; total: number; limit: number; offset: number }>('l0-sessions', {
+      block_id: blockId, limit, offset,
+    }),
+
+  /** 覆盖写 Chat L2 scene 文件（仅资产 owner 可用） */
+  l2Write: (blockId: string, path: string, content: string, summary?: string) =>
+    chatMemoryCall<{ path: string; updated_at: string; version?: string }>('l2-write', {
+      block_id: blockId, path, content, ...(summary ? { summary } : {}),
+    }),
+
+  /** 删除 Chat L2 scene 文件（仅资产 owner 可用） */
+  l2Delete: (blockId: string, path: string) =>
+    chatMemoryCall<{ deleted?: boolean }>('l2-delete', {
+      block_id: blockId, path,
+    }),
+
+  /** 覆盖写 Chat L3 core memory（仅资产 owner 可用） */
+  l3Update: (blockId: string, content: string) =>
+    chatMemoryCall<{ updated_at: string; version?: string }>('l3-update', {
+      block_id: blockId, content,
+    }),
 
   /** 导入历史对话到 agent 的 L0（走 /v3/conversation/add） */
   import: (teamId: string, agentId: string, messages: Array<{ role: string; content: string }>, sessionId?: string) =>
