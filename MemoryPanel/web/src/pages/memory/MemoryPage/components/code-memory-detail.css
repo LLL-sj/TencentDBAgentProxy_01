@@ -343,3 +343,44 @@
   font-style: normal;
   opacity: 0.8;
 }
+
+/* Code L2 topic editing / deleting */
+._code-memory-project-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+._code-memory-project-edit-btn,
+._code-memory-project-delete-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--tea-color-border-primary-default);
+  background: var(--tea-color-bg-primary-default);
+  color: var(--tea-color-text-secondary);
+  cursor: pointer;
+}
+
+._code-memory-project-edit-btn:hover {
+  border-color: var(--tea-color-border-brand-default);
+  color: var(--tea-color-text-brand-default);
+}
+
+._code-memory-project-delete-btn:hover {
+  border-color: var(--tea-color-border-error-default);
+  color: var(--tea-color-text-error-default);
+}
+
+._code-memory-project-edit-path {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  color: var(--tea-color-text-tertiary);
+  word-break: break-all;
+}

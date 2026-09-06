@@ -48,6 +48,8 @@ import {
   scenarioWriteRequestSchema,
   scenarioRmRequestSchema,
   scenarioCountRequestSchema,
+  projectWriteRequestSchema,
+  projectRmRequestSchema,
   coreWriteRequestSchema,
   coreCountRequestSchema,
   teamCreateRequestSchema,
@@ -97,10 +99,13 @@ import {
 import { stripSceneNavigation } from "../core/scene/scene-navigation.js";
 import { buildProfileIsolationScope, buildProfileStableId, DEFAULT_PROFILE_SCOPE } from "../core/profile/profile-sync.js";
 import {
+  deleteProjectTopicFile,
   listProjectTopics,
   readProjectMemoryIndex,
   readProjectTopic,
   searchProjectTopics,
+  writeProjectTopicFile,
+  writeProjectMemoryIndex,
 } from "../utils/project-memory-packager.js";
 
 const TAG = "[tdai-gateway][v2]";
@@ -184,6 +189,8 @@ const V3_ALLOWED_SUBPATHS = new Set<string>([
   "/project/list",
   "/project/read",
   "/project/search",
+  "/project/write",
+  "/project/rm",
 ]);
 
 /**
@@ -570,6 +577,37 @@ async function handleTipsGet(body: unknown, _auth: V2AuthContext, requestId: str
 // Code Memory v2 Project Memory Handlers
 // ============================
 
+/**
+ * Simple in-process per-(team,agent) mutation queue for Code project topics.
+ * It prevents concurrent write/rm from losing topic files or rebuilding
+ * project/MEMORY.md with a stale snapshot. Multi-instance deployments should
+ * add a distributed lock later.
+ */
+const projectMutationQueues = new Map<string, Promise<void>>();
+
+async function withProjectMutationLock<T>(
+  teamId: string,
+  agentId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = `${teamId}\u0000${agentId}`;
+  const previous = projectMutationQueues.get(key) ?? Promise.resolve();
+  let releaseNext!: () => void;
+  const next = new Promise<void>((resolve) => {
+    releaseNext = resolve;
+  });
+  projectMutationQueues.set(
+    key,
+    previous.then(() => next).catch(() => next),
+  );
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    releaseNext();
+  }
+}
+
 function projectStorageFor(deps: V2RouterDeps, teamId: string, agentId: string): StorageAdapter | undefined {
   const base = deps.getStorage();
   if (!base) return undefined;
@@ -636,6 +674,63 @@ async function handleProjectSearch(body: unknown, _auth: V2AuthContext, requestI
   }
 }
 
+async function handleProjectWrite(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const parsed = projectWriteRequestSchema.safeParse(body);
+  if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
+  const iso = deps.requestIsolation;
+  if (!iso?.teamId || !iso.agentId) return errorEnvelope(400, "team_id and agent_id are required", requestId);
+  const rawPath = parsed.data.path?.trim() || parsed.data.name?.trim() || "";
+  const storage = projectStorageFor(deps, iso.teamId, iso.agentId);
+  if (!storage) return errorEnvelope(503, "storage adapter is not available", requestId);
+  try {
+    const result = await withProjectMutationLock(iso.teamId, iso.agentId, async () => {
+      const written = await writeProjectTopicFile("", storage, rawPath, parsed.data.content);
+      const indexHash = await writeProjectMemoryIndex("", storage, { indexMaxChars: 6000 });
+      return { written, indexHash };
+    });
+    return successEnvelope({
+      path: result.written.path,
+      name: result.written.name,
+      updated_at: new Date().toISOString(),
+      index_hash: result.indexHash,
+    }, requestId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/invalid project topic path|memory\.md cannot/i.test(message)) {
+      return errorEnvelope(400, message, requestId);
+    }
+    return errorEnvelope(500, `project write failed: ${message}`, requestId);
+  }
+}
+
+async function handleProjectRm(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const parsed = projectRmRequestSchema.safeParse(body);
+  if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
+  const iso = deps.requestIsolation;
+  if (!iso?.teamId || !iso.agentId) return errorEnvelope(400, "team_id and agent_id are required", requestId);
+  const storage = projectStorageFor(deps, iso.teamId, iso.agentId);
+  if (!storage) return errorEnvelope(503, "storage adapter is not available", requestId);
+  try {
+    const result = await withProjectMutationLock(iso.teamId, iso.agentId, async () => {
+      const removed = await deleteProjectTopicFile("", storage, parsed.data.path);
+      const indexHash = await writeProjectMemoryIndex("", storage, { indexMaxChars: 6000 });
+      return { removed, indexHash };
+    });
+    return successEnvelope({
+      deleted: true,
+      path: result.removed.path,
+      name: result.removed.name,
+      index_hash: result.indexHash,
+    }, requestId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/invalid project topic path|memory\.md cannot/i.test(message)) {
+      return errorEnvelope(400, message, requestId);
+    }
+    return errorEnvelope(500, `project delete failed: ${message}`, requestId);
+  }
+}
+
 const routeTable: Record<string, RouteHandler> = {
   // L0–L3 数据面：历史读写接口保留 /v2 与 /v3 双入口；count 仅按 sdk-v3.yaml 暴露 /v3。
   ...Object.fromEntries(
@@ -679,6 +774,8 @@ const routeTable: Record<string, RouteHandler> = {
   [`${V3_PREFIX}/project/list`]: handleProjectList,
   [`${V3_PREFIX}/project/read`]: handleProjectRead,
   [`${V3_PREFIX}/project/search`]: handleProjectSearch,
+  [`${V3_PREFIX}/project/write`]: handleProjectWrite,
+  [`${V3_PREFIX}/project/rm`]: handleProjectRm,
   // ── L0 session summaries (Panel L0 session list) ──
   [`${V3_PREFIX}/conversation/sessions`]: handleConversationSessions,
 };

@@ -283,6 +283,33 @@ export const scenarioRmRequestSchema = z.object({ path: safePath });
 export type ScenarioRmRequest = z.infer<typeof scenarioRmRequestSchema>;
 
 // ============================
+// Code Memory v2 Project Topic write/delete
+// ============================
+
+/**
+ * project topic write request. `path` or `name` selects the flat
+ * `project/topics/<name>.md` file. MemoryCore performs the final path sandbox.
+ */
+export const projectWriteRequestSchema = z.object({
+  path: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  content: z.string().min(1),
+  expected_version: z.string().optional(),
+}).refine(
+  (data) => Boolean(data.path?.trim() || data.name?.trim()),
+  { message: "path or name is required" },
+);
+export type ProjectWriteRequest = z.infer<typeof projectWriteRequestSchema>;
+
+export const projectRmRequestSchema = z.object({
+  path: z.string().min(1),
+}).refine(
+  (data) => Boolean(data.path.trim()),
+  { message: "path is required" },
+);
+export type ProjectRmRequest = z.infer<typeof projectRmRequestSchema>;
+
+// ============================
 // Override: conversation delete mutual exclusion
 // ============================
 

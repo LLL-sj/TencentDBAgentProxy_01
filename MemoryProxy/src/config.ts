@@ -132,7 +132,7 @@ export const DEFAULT_CONFIG: ProxyConfig = {
     timeoutMs: 1500,
   },
   skillRuntime: {
-    allowLlmWrite: false,
+    allowLlmWrite: true,
   },
   tips: {
     enabled: true,

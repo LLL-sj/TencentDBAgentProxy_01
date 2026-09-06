@@ -166,6 +166,29 @@ function safeTopicName(name: string): string {
 }
 
 /**
+ * Normalize a project topic reference to a flat filename.
+ *
+ * Accepted forms:
+ *   - `mysql-timeout.md`
+ *   - `topics/mysql-timeout.md`
+ *   - `project/topics/mysql-timeout.md`
+ *
+ * Returns an empty string for unsafe/nested paths. Callers use this as the
+ * single path sandbox before writing or deleting `project/topics/*.md`.
+ */
+export function normalizeProjectTopicName(rawPath: string): string {
+  let normalized = rawPath.trim().replace(/\\/g, "/").replace(/^\.?\//, "");
+  if (normalized.startsWith("project/topics/")) {
+    normalized = normalized.slice("project/topics/".length);
+  } else if (normalized.startsWith("topics/")) {
+    normalized = normalized.slice("topics/".length);
+  }
+  const name = safeTopicName(normalized);
+  if (!name || name.startsWith(".") || name.startsWith("_")) return "";
+  return name;
+}
+
+/**
  * Recursively collect .md files below project/topics (local filesystem only).
  * Returns absolute file paths.
  */
@@ -440,13 +463,44 @@ export async function listProjectTopics(
 }
 
 export async function readProjectTopic(dataDir: string, storage: StorageAdapter | undefined, topicPath: string): Promise<ProjectTopicFile | null> {
-  const normalized = topicPath.trim().replace(/\\/g, "/").replace(/^\.?\//, "");
-  const relative = normalized.startsWith("topics/") ? normalized.slice("topics/".length) : normalized;
-  const name = safeTopicName(relative);
+  const name = normalizeProjectTopicName(topicPath);
   if (!name) return null;
   const content = await readText(dataDir, storage, `${PROJECT_TOPICS_PREFIX}${name}`);
   if (content === null) return null;
   return parseProjectTopic(name, content);
+}
+
+export interface WriteProjectTopicResult {
+  name: string;
+  path: string;
+}
+
+/** Write (create or overwrite) a flat project topic. Caller should rebuild the index afterwards. */
+export async function writeProjectTopicFile(
+  dataDir: string,
+  storage: StorageAdapter | undefined,
+  rawPath: string,
+  content: string,
+): Promise<WriteProjectTopicResult> {
+  const name = normalizeProjectTopicName(rawPath);
+  if (!name) throw new Error("Invalid project topic path: only flat project/topics/<name>.md is allowed");
+  const key = `${PROJECT_TOPICS_PREFIX}${name}`;
+  await writeText(dataDir, storage, key, content);
+  return { name, path: `topics/${name}` };
+}
+
+/** Delete a flat project topic. Caller should rebuild the index afterwards. */
+export async function deleteProjectTopicFile(
+  dataDir: string,
+  storage: StorageAdapter | undefined,
+  rawPath: string,
+): Promise<WriteProjectTopicResult> {
+  const name = normalizeProjectTopicName(rawPath);
+  if (!name) throw new Error("Invalid project topic path: only flat project/topics/<name>.md is allowed");
+  if (name.toLowerCase() === "memory.md") throw new Error("project/MEMORY.md cannot be deleted via project topics API");
+  const key = `${PROJECT_TOPICS_PREFIX}${name}`;
+  await deleteTopicFile(dataDir, storage, key);
+  return { name, path: `topics/${name}` };
 }
 
 export async function searchProjectTopics(

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
-import { Tag } from 'tea-component';
+import { Button, Input, Modal, Tag } from 'tea-component';
+import { tea } from '@/lib/tea-bridge';
 import { chatMemoryApi, type ChatMemoryLayerItem, type L0SessionSummary } from '@/lib/teamApi';
 import { projectApi, formatProjectError, type ProjectListResult, type ProjectTopicFile } from '@/lib/project-api';
 import { tipsApi, formatTipsError, TIP_STATUS_LABELS, type SummaryTipItem, type TipStatus } from '@/lib/tips-api';
@@ -269,26 +270,44 @@ export function CodeMemoryDetail({
     }
   }, [teamId]);
 
-  // ── L2 / L3（project/list + project/read）────────────────────
+  // ── L2 / L3（project/list + project/read/write/delete）─────────
   const [project, setProject] = useState<ProjectListResult | null>(null);
   const [selectedTopic, setSelectedTopic] = useState<ProjectTopicFile | null>(null);
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectError, setProjectError] = useState('');
   const [topicLoadingId, setTopicLoadingId] = useState<string | null>(null);
+  const [editTopic, setEditTopic] = useState<{ path: string; content: string } | null>(null);
+  const [topicSaving, setTopicSaving] = useState(false);
+
+  const reloadProject = useCallback(async () => {
+    if (!agentId) return;
+    setProjectLoading(true);
+    setProjectError('');
+    try {
+      const res = await projectApi.list({ teamId, blockId: block.id });
+      setProject(res);
+      return res;
+    } catch (err) {
+      setProjectError(formatProjectError(err));
+      return null;
+    } finally {
+      setProjectLoading(false);
+    }
+  }, [agentId, block.id, teamId]);
 
   useEffect(() => {
     if (layer !== 'L2' && layer !== 'L3') return;
     let cancelled = false;
     setProject(null);
     setSelectedTopic(null);
+    setEditTopic(null);
     setProjectError('');
     if (!agentId) return;
     setProjectLoading(true);
     projectApi
       .list({ teamId, blockId: block.id })
       .then((res) => {
-        if (cancelled) return;
-        setProject(res);
+        if (!cancelled) setProject(res);
       })
       .catch((err) => {
         if (!cancelled) setProjectError(formatProjectError(err));
@@ -312,6 +331,41 @@ export function CodeMemoryDetail({
       setTopicLoadingId(null);
     }
   }, [block.id, teamId]);
+
+  async function saveTopicEdit() {
+    if (!editTopic) return;
+    setTopicSaving(true);
+    try {
+      await projectApi.write({ teamId, blockId: block.id }, editTopic.path, editTopic.content);
+      tea.notify.success(t('memory.code.topicSaved'));
+      setEditTopic(null);
+      await reloadProject();
+      const detail = await projectApi.read({ teamId, blockId: block.id }, editTopic.path);
+      setSelectedTopic(detail);
+    } catch (err) {
+      tea.notify.error(err instanceof Error ? err.message : t('memory.notify.saveFailed'));
+    } finally {
+      setTopicSaving(false);
+    }
+  }
+
+  async function deleteTopic(topicPath: string) {
+    const ok = await tea.confirm({
+      message: t('memory.code.topicDeleteConfirm'),
+      description: topicPath,
+      okText: t('common.confirm'),
+      cancelText: t('common.cancel'),
+    });
+    if (!ok) return;
+    try {
+      await projectApi.delete({ teamId, blockId: block.id }, topicPath);
+      tea.notify.success(t('memory.code.topicDeleted'));
+      setSelectedTopic(null);
+      await reloadProject();
+    } catch (err) {
+      tea.notify.error(err instanceof Error ? err.message : t('memory.notify.deleteFailed'));
+    }
+  }
 
   const chatPageCount = Math.max(1, Math.ceil(chatData.total / CHAT_LAYER_PAGE_SIZE));
   const safeChatPage = Math.min(chatPage, chatPageCount - 1);
@@ -392,6 +446,8 @@ export function CodeMemoryDetail({
             error={projectError}
             topicLoadingId={topicLoadingId}
             onOpenTopic={openTopic}
+            onEditTopic={(topicPath, content) => setEditTopic({ path: topicPath, content })}
+            onDeleteTopic={(topicPath) => void deleteTopic(topicPath)}
           />
         ) : null}
 
@@ -404,6 +460,32 @@ export function CodeMemoryDetail({
           />
         ) : null}
       </div>
+
+      {editTopic && (
+        <Modal
+          visible
+          caption={t('memory.code.topicEditTitle')}
+          size="xl"
+          onClose={() => setEditTopic(null)}
+        >
+          <Modal.Body>
+            <div className="_code-memory-project-edit-path">{editTopic.path}</div>
+            <Input.TextArea
+              size="full"
+              className="_memory-detail-edit-textarea"
+              value={editTopic.content}
+              onChange={(v) => setEditTopic((cur) => (cur ? { ...cur, content: v } : cur))}
+              rows={16}
+            />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button type="primary" loading={topicSaving} onClick={() => void saveTopicEdit()}>
+              {t('common.save')}
+            </Button>
+            <Button onClick={() => setEditTopic(null)}>{t('common.cancel')}</Button>
+          </Modal.Footer>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -673,6 +755,8 @@ function ProjectTopicsView({
   error,
   topicLoadingId,
   onOpenTopic,
+  onEditTopic,
+  onDeleteTopic,
 }: {
   agentId?: string;
   project: ProjectListResult | null;
@@ -681,6 +765,8 @@ function ProjectTopicsView({
   error: string;
   topicLoadingId: string | null;
   onOpenTopic: (path: string) => void;
+  onEditTopic?: (path: string, content: string) => void;
+  onDeleteTopic?: (path: string) => void;
 }) {
   const { t } = useTranslation();
   if (!agentId) return <ScopeRequired agentId={agentId} />;
@@ -716,8 +802,24 @@ function ProjectTopicsView({
           <>
             <div className="_code-memory-detail-subhead">
               <div className="_code-memory-detail-subtitle">{selectedTopic.title}</div>
-              <span className="_code-memory-project-path">{selectedTopic.path}</span>
-              {selectedTopic.updated ? <span className="_code-memory-project-updated">Updated: {formatTopicUpdated(selectedTopic.updated)}</span> : null}
+              <div className="_code-memory-project-actions">
+                <span className="_code-memory-project-path">{selectedTopic.path}</span>
+                {selectedTopic.updated ? <span className="_code-memory-project-updated">Updated: {formatTopicUpdated(selectedTopic.updated)}</span> : null}
+                <button
+                  type="button"
+                  className="_code-memory-project-edit-btn"
+                  onClick={() => onEditTopic?.(selectedTopic.path, selectedTopic.content)}
+                >
+                  {t('common.edit')}
+                </button>
+                <button
+                  type="button"
+                  className="_code-memory-project-delete-btn"
+                  onClick={() => onDeleteTopic?.(selectedTopic.path)}
+                >
+                  {t('common.delete')}
+                </button>
+              </div>
             </div>
             <div className="_code-memory-project-tags">
               <span className="_code-memory-project-type">{selectedTopic.type}</span>

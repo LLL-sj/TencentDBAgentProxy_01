@@ -1,7 +1,7 @@
 /**
  * TdaiMemoryToolsInjector — inject a static `<tdai_memory_tools>` text block
  * that teaches the LLM to curl `<proxy>/memory-bridge/v3/*` for TDAI memory
- * read operations.
+ * read and controlled write operations.
  *
  * 设计与 skill-tools-injector 完全同形（参见 docs/design/2026-06-17-team-skill-proxy-runtime.md §4）：
  *
@@ -10,22 +10,28 @@
  *     工具去 curl 一个 proxy 路径，proxy 端反向代理到 tdai gateway，期间注入
  *     IdFields + Bearer，rules out LLM 伪造身份 + 防止 token 进入 prompt。
  *
- *   Tools 集合（**只读**，静态注入 system prompt，cache 友好）：
- *     - tdai_memory_search       L1 双路 hybrid search（atomic/search）
- *     - tdai_atomic_query        L1 按 type / 时间 / 分页（atomic/query）
- *     - tdai_conversation_search L0 对话 hybrid search（conversation/search）
- *     - tdai_conversation_query  L0 按 session 取历史（conversation/query）
- *     - tdai_scenario_ls         L2 列出 scene_blocks 路径索引
- *     - tdai_read_scene          L2 按 path 读全文
+ *   Tools 集合（读 + 受控写，静态注入 system prompt，cache 友好）：
+ *     - Read:
+ *       - tdai_memory_search       L1 双路 hybrid search（atomic/search）
+ *       - tdai_atomic_query        L1 按 type / 时间 / 分页（atomic/query）
+ *       - tdai_conversation_search L0 对话 hybrid search（conversation/search）
+ *       - tdai_conversation_query  L0 按 session 取历史（conversation/query）
+ *       - tdai_scenario_ls         L2 列出 scene_blocks 路径索引
+ *       - tdai_read_scene          L2 按 path 读全文
+ *       - project list/read/search 通过对应只读 endpoint 按需使用
+ *     - Write (self-only):
+ *       - tdai_update_scene  scenario/write
+ *       - tdai_delete_scene  scenario/rm
+ *       - tdai_update_core   core/write
+ *       - tdai_write_project_topic project/write
+ *       - tdai_delete_project_topic project/rm
  *
  *   设计取舍：
  *     - L0/L1 **不再每轮自动召回**注入到 user prompt（会破坏 KV/prompt cache），
  *       改为静态工具按需检索；system prompt 稳定 → 命中 prompt cache。
  *     - L3（persona）由 tdai-profile-memory-injector **直接注入** system，无需工具。
  *     - L2 索引也直接注入 system（`<l2_scene_index>`），正文按需用 read_scene。
- *
- *   写操作 (atomic/update / conversation/delete / scenario/write / scenario/rm / core/write)
- *   不在 bridge allowlist 里；写入由主链路注入器控制。
+ *     - 写工具只作用于当前 session 的 self agent；imported/借入记忆保持只读。
  *
  *   注入点：`system.suffix`（不像 skill 是 `tools.append`，因为我们不再用
  *   native tool）。在 system prompt 末尾贴一段说明，告诉 LLM 这些 endpoint
@@ -83,15 +89,16 @@ export function renderTdaiMemoryToolsBlock(
       : "遇到用户问身份/历史/偏好/过往结论/项目约定时，必须先使用下面的 TDAI 记忆工具查询，再基于查询结果回答。",
     "禁止说\"我没有这个工具 / 需要 MCP / 只能查本地记忆\" —— 你有 TDAI 记忆工具，就用下面的 curl 命令。",
     "",
-    "调用方式：Bash 里执行 curl 命中 proxy 的 memory-bridge 路径。proxy 会自动注入身份鉴权（team_id/user_id/agent_id），body 只需业务字段。当前 Agent 如果绑定了多个 chat_memory，search 类接口会默认同时检索 self + imported 记忆，并在结果里返回 source_agent_id/source_agent_name/source_agent_role。",
+    "调用方式：Bash 里执行 curl 命中 proxy 的 memory-bridge 路径。proxy 会自动注入身份鉴权（team_id/user_id/agent_id）。当前 Agent 如果绑定了多个 chat_memory，search 类接口会默认同时检索 self + imported 记忆；写工具只能作用于当前 session 的 self agent。",
     "",
     "覆盖范围：",
     isCode
       ? "- L3（Team Operating Doctrine）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；"
       : "- L3（persona 长期画像）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；",
-    "- L2 正文按需用 tdai_read_scene 读取；",
+    "- L2 正文按需用 tdai_read_scene 读取；Code Memory topic 用 project/read；",
     "- L0/L1（原始对话 / 原子记忆）**不再每轮自动召回**（会破坏 KV cache），需要时主动调工具检索。",
     "",
+    "## 读工具",
     "  <tool name=\"tdai_memory_search\">",
     `    curl: ${bridge}/atomic/search`,
     `    body: {"query": "<text>", "limit": 5}`,
@@ -132,10 +139,51 @@ export function renderTdaiMemoryToolsBlock(
     "    use:  按 path 读取 L2 场景文件全文。path 必须先从 `<l2_scene_index>` 或 tdai_scenario_ls 获取，不要凭空构造；读取 imported_from 分段的 path 时带上该分段 agent_id。",
     "  </tool>",
     "",
+    "  <tool name=\"tdai_read_project_topic\">",
+    `    curl: ${bridge}/project/read`,
+    `    body: {"path": "<topics/xxx.md>", "agent_id": "?读取 imported 记忆时传"}`,
+    isCode
+      ? "    use:  按 path 读取 Code Memory project/topics/*.md 全文。path 先从 project/list 或 MEMORY.md 索引获取。"
+      : "    use:  按 path 读取 Code Memory project/topics/*.md 全文。该工具主要在 code 项目记忆场景使用。",
+    "  </tool>",
+    "",
+    "## 受控写工具",
+    "  下面写工具只能修改当前 session 归属的 self agent；修改前应先使用读工具查询当前内容；不要自行构造 team_id/user_id/agent_id/session_id，proxy 会注入。",
+    "  <tool name=\"tdai_update_scene\">",
+    `    curl: ${bridge}/scenario/write`,
+    `    body: {"path": "<scene path>", "content": "<完整新 Markdown>", "summary": "?可选"}`,
+    "    use:  覆盖写已存在的 L2 scene 文件。只能作用于当前 session 的 self agent；path 必须来自 scenario_ls / 已注入索引；当前底层不支持通过该接口新建 path。",
+    "  </tool>",
+    "",
+    "  <tool name=\"tdai_delete_scene\">",
+    `    curl: ${bridge}/scenario/rm`,
+    `    body: {"path": "<scene path>"}`,
+    "    use:  删除 L2 scene 文件（只允许当前 session 的 self agent）。删除前确认 path 来自只读索引。",
+    "  </tool>",
+    "",
+    "  <tool name=\"tdai_update_core\">",
+    `    curl: ${bridge}/core/write`,
+    `    body: {"content": "<完整 core memory Markdown>"}`,
+    "    use:  覆盖写 L3 persona/core memory（只允许当前 session 的 self agent）。应先把现有内容读出来再编辑，避免覆盖丢失。",
+    "  </tool>",
+    "",
+    "  <tool name=\"tdai_write_project_topic\">",
+    `    curl: ${bridge}/project/write`,
+    `    body: {"path": "<topics/xxx.md>", "content": "<完整带 frontmatter 的 Markdown>"}`,
+    "    use:  新建或覆盖 Code Memory L2 topic 文件（只允许当前 session 的 self agent）。path 必须是扁平 project/topics/<name>.md；写完后 MEMORY.md 会自动重建，无需再调用其他写接口。",
+    "  </tool>",
+    "",
+    "  <tool name=\"tdai_delete_project_topic\">",
+    `    curl: ${bridge}/project/rm`,
+    `    body: {"path": "<topics/xxx.md>"}`,
+    "    use:  删除 Code Memory L2 topic 文件（只允许当前 session 的 self agent）。删除后 MEMORY.md 会自动重建。",
+    "  </tool>",
+    "",
     "## 调用约束",
-    "- 这些是只读工具；要修改 L1/L2/L3 必须用主链路（agent_id 自动归属）。",
-    "- 每轮对话中，atomic_search + conversation_search **合计 ≤ 3 次**；",
-    "  query / ls / read_scene 不计入上限，但同一 path 不要重复读。",
+    "- 读工具只读；写工具是受控写，只能作用于当前 session 的 self agent，不能修改 imported/借入记忆。",
+    "- 修改 L2/L3 前先用读工具查询当前内容；不要自行构造 team_id/user_id/agent_id/session_id。",
+    "- `scenario/write` 只能改已存在 path；`project/write` 写完会自动重建 MEMORY.md。",
+    "- 每轮对话中，atomic_search + conversation_search **合计 ≤ 3 次**；query / ls / read_scene / read_project_topic 不计入上限，但同一 path 不要重复读。",
     "- 失败重试：HTTP 5xx 可一次性 retry；HTTP 4xx 不要重试。",
     "- 所有 curl 必须带：" +
       (spaceId ? `x-tdai-service-id: ${spaceId}、` : "x-tdai-service-id（当前 memory 实例，见示例）、") +

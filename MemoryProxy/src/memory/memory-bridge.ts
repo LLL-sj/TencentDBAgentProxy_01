@@ -15,8 +15,9 @@
  *   6. 透传 status 和 JSON body
  *
  * 安全：
- *   - allowlist 限定只有 search / read 类只读 subpath；mutation 走主链路
- *   - 不接受 atomic/update / scenario/write / core/write 等写操作
+ *   - READ_SUBPATHS 限定 search / read 类只读；WRITE_SUBPATHS 为受控写路径
+ *   - 写操作只允许修改当前 session 归属的 self agent，不能通过 agent_id 选择
+ *     imported/借入 agent，也不能伪造 team/user/agent
  *   - v3 strict isolation: 强制注入 session_id，满足 L0/L1 必填要求
  */
 
@@ -34,17 +35,15 @@ import type { TdaiIdentity } from "../tdai/types.js";
 const TAG = "[memory-bridge]";
 
 /**
- * 允许通过 bridge 转发的 tdai 子路径（**只读**，LLM 通过 Bash 工具按需调用）。
+ * 允许通过 bridge 转发的 tdai 只读子路径（LLM 通过 Bash 工具按需调用）。
  *
  * 设计取舍：
  *   - L0/L1 不再每轮自动召回，改为静态工具按需检索（cache 友好），因此放行
  *     atomic/* 与 conversation/* 的 search/query。
  *   - L2：system 给索引 `<l2_scene_index>`，正文按需读 → 放行 scenario/ls + scenario/read。
- *   - L3（persona）：直接注入 system，无需工具 → **不放行** core/read。
- *
- * 写操作（write / rm / add / update / delete）一律不在 allowlist 里；写入走主链路。
+ *   - L3（persona）：直接注入 system，无需工具 → 只读 core 不放行（编辑走 core/write）。
  */
-const ALLOWED_SUBPATHS = new Set<string>([
+const READ_SUBPATHS = new Set<string>([
   "atomic/search",        // L1 原子记忆 hybrid search
   "atomic/query",         // L1 按 type/时间/分页
   "conversation/search",  // L0 对话 hybrid search
@@ -55,6 +54,20 @@ const ALLOWED_SUBPATHS = new Set<string>([
   "project/read",         // Code Memory v2 topic 全文（按 path）
   "project/search",       // Code Memory v2 topic 搜索
 ]);
+
+/**
+ * 允许通过 bridge 转发的受控写子路径。这些请求只能作用于当前 session 的 self
+ * agent；body 中的 agent_id 若指向 imported/借入 agent 会被 bridge 拒绝。
+ */
+const WRITE_SUBPATHS = new Set<string>([
+  "scenario/write",       // L2 覆盖写已存在 scene 文件
+  "scenario/rm",          // L2 删除 scene 文件
+  "core/write",           // L3 覆盖写 persona/core memory
+  "project/write",        // Code Memory L2 topic 新建/覆盖
+  "project/rm",           // Code Memory L2 topic 删除
+]);
+
+const ALLOWED_SUBPATHS = new Set<string>([...READ_SUBPATHS, ...WRITE_SUBPATHS]);
 
 interface SessionIdFields {
   user_id: string;
@@ -315,6 +328,24 @@ export function createMemoryBridgeHandler(
     };
 
     const ctxs = await resolveMemoryCtxs(config, ids, sessionKey);
+
+    // 写操作仅允许 self：不能通过 agent_id 指向 imported/借入 agent。
+    const isWrite = WRITE_SUBPATHS.has(sub);
+    if (isWrite) {
+      const requestedAgentId = typeof inboundBody.agent_id === "string" ? inboundBody.agent_id.trim() : "";
+      if (requestedAgentId && requestedAgentId !== ids.agent_id) {
+        return envelope(
+          40302,
+          `${TAG} write to '${sub}' is self-only; cannot target imported agent '${requestedAgentId}'`,
+          403,
+        );
+      }
+      const importedCount = ctxs.filter((ctx) => !ctx.isSelf).length;
+      console.log(
+        `${TAG} sub=${sub} write=true self=${ids.agent_id} imported=${importedCount} session=${sessionKey}`,
+      );
+    }
+
     // task_id 优先级：caller 显式传 > session 注入。session_id 保持"仅 caller 显式传"，
     // 因为 search 类希望默认跨 session（agent 维度）；task_id 属于身份维度，仍应强制。
     const effectiveTaskId = modelTaskId ?? ids.task_id;
@@ -376,7 +407,7 @@ export function createMemoryBridgeHandler(
 
     let upstream;
     try {
-      upstream = await callUpstream(selectTargetCtx(ctxs, inboundBody.agent_id));
+      upstream = await callUpstream(selectTargetCtx(ctxs, isWrite ? undefined : inboundBody.agent_id));
     } catch (err) {
       console.warn(
         `${TAG} upstream fetch failed sub=${sub} err=${(err as Error).message}`,

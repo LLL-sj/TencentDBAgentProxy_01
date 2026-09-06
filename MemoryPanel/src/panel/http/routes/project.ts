@@ -5,9 +5,9 @@
  *   L2: project/topics/*.md
  *   L3: project/MEMORY.md
  *
- * Panel is read-only here. Every endpoint requires an active team member,
- * resolves the MemoryCore isolation scope from block_id or team_id+agent_id,
- * then forwards to MemoryCore /v3/project/list|read.
+ * Read endpoints require an active team member. Write endpoints require the
+ * block owner when a block_id is supplied (or team membership for legacy
+ * agent_id-only callers), then forwards to MemoryCore /v3/project/*.
  *
  * block_id precedence follows the memory panel's existing block model:
  *   - `chat_memory-{team_id}-{agent_id}` is parsed to { team_id, agent_id }.
@@ -24,6 +24,7 @@ import {
   buildCtx,
   readJson,
   requireTeamMember,
+  resolveCallerUserId,
   str,
 } from "./knowledge/common.js";
 
@@ -58,6 +59,45 @@ async function validateAgentInTeam(
   } catch {
     return false;
   }
+}
+
+/**
+ * Project write permission gate.
+ *
+ * When the request has a chat_memory block_id, only the asset owner may edit
+ * that agent's Code Memory project topics. For agent_id-only callers we keep
+ * the previous team-member gate (used by internal/admin callers).
+ */
+async function authorizeProjectWrite(
+  deps: PanelDeps,
+  c: Context,
+  ctx: MetaCallContext,
+  body: Record<string, unknown>,
+  teamId: string,
+  agentId: string,
+): Promise<{ userId: string } | { error: Response }> {
+  const meUserId = await resolveCallerUserId(deps, ctx);
+  if (!meUserId) return { error: respondControlError(c, 401, 'INVALID_USER_KEY') };
+  const blockId = str(body, 'block_id');
+  if (blockId) {
+    const parsed = parseChatMemoryBlockId(blockId);
+    if (!parsed || parsed.teamId !== teamId || parsed.agentId !== agentId) {
+      return { error: respondControlError(c, 400, 'TEAM_AGENT_MISMATCH') };
+    }
+    const env = await deps.metaKernel.invoke('asset/get', { asset_id: blockId }, ctx);
+    if (env.code !== 0 || !env.data) {
+      return { error: respondControlError(c, 404, 'BLOCK_NOT_FOUND') };
+    }
+    const asset = env.data as { asset_type?: string; owner_user_id?: string };
+    if (asset.asset_type !== 'chat_memory' || asset.owner_user_id !== meUserId) {
+      return { error: respondControlError(c, 403, 'ASSET_NOT_EDITABLE') };
+    }
+    return { userId: meUserId };
+  }
+
+  const member = await requireTeamMember(deps, c, ctx, teamId);
+  if ('error' in member) return member;
+  return { userId: member.userId };
 }
 
 /**
@@ -169,6 +209,68 @@ export function registerProjectRoutes(api: Hono, deps: PanelDeps): void {
       agent_id: scope.agentId,
       user_id: gate.userId,
       path: topicPath,
+    });
+    if ("error" in result) return result.error;
+    return respondEnvelope(c, {
+      code: 0,
+      message: "ok",
+      request_id: c.get("reqId") ?? "",
+      data: result.data,
+    });
+  });
+
+  api.post("/project/write", mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+
+    const content = typeof body?.content === "string" ? body.content : "";
+    const pathValue = str(body, "path");
+    const nameValue = str(body, "name");
+    if (!content || (!pathValue && !nameValue)) {
+      return respondControlError(c, 400, "MISSING_PATH_OR_CONTENT");
+    }
+
+    const scope = await resolveProjectScope(deps, c, ctx, body);
+    if ("error" in scope) return scope.error;
+
+    const writeGate = await authorizeProjectWrite(deps, c, ctx, body, scope.teamId, scope.agentId);
+    if ("error" in writeGate) return writeGate.error;
+
+    const result = await callProjectCore(deps, c, ctx, "/v3/project/write", {
+      team_id: scope.teamId,
+      agent_id: scope.agentId,
+      user_id: writeGate.userId,
+      ...(pathValue ? { path: pathValue } : {}),
+      ...(nameValue ? { name: nameValue } : {}),
+      content,
+    });
+    if ("error" in result) return result.error;
+    return respondEnvelope(c, {
+      code: 0,
+      message: "ok",
+      request_id: c.get("reqId") ?? "",
+      data: result.data,
+    });
+  });
+
+  api.post("/project/delete", mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+
+    const pathValue = str(body, "path");
+    if (!pathValue) return respondControlError(c, 400, "MISSING_PATH");
+
+    const scope = await resolveProjectScope(deps, c, ctx, body);
+    if ("error" in scope) return scope.error;
+
+    const writeGate = await authorizeProjectWrite(deps, c, ctx, body, scope.teamId, scope.agentId);
+    if ("error" in writeGate) return writeGate.error;
+
+    const result = await callProjectCore(deps, c, ctx, "/v3/project/rm", {
+      team_id: scope.teamId,
+      agent_id: scope.agentId,
+      user_id: writeGate.userId,
+      path: pathValue,
     });
     if ("error" in result) return result.error;
     return respondEnvelope(c, {

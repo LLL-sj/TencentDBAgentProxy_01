@@ -101,6 +101,23 @@ export const projectApi = {
       ...(!scope.blockId && scope.agentId ? { agent_id: scope.agentId } : {}),
       path,
     }),
+  /** 新建/覆盖 project/topics/<name>.md；服务端会随后重建 MEMORY.md。 */
+  write: (scope: ProjectScope, path: string, content: string) =>
+    panelPost<{ path: string; name: string; updated_at: string; index_hash: string }>('/write', {
+      team_id: scope.teamId,
+      ...(scope.blockId ? { block_id: scope.blockId } : {}),
+      ...(!scope.blockId && scope.agentId ? { agent_id: scope.agentId } : {}),
+      path,
+      content,
+    }),
+  /** 删除 project/topics/<name>.md；服务端会随后重建 MEMORY.md。 */
+  delete: (scope: ProjectScope, path: string) =>
+    panelPost<{ deleted: boolean; path: string; name: string; index_hash: string }>('/delete', {
+      team_id: scope.teamId,
+      ...(scope.blockId ? { block_id: scope.blockId } : {}),
+      ...(!scope.blockId && scope.agentId ? { agent_id: scope.agentId } : {}),
+      path,
+    }),
 };
 
 export function formatProjectError(err: unknown): string {

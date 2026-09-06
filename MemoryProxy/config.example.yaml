@@ -586,7 +586,7 @@ codexInternal:
     - "The following is the Codex agent history added since your last approval assessment"
 
 skillRuntime:
-  allowLlmWrite: false           # 是否允许主模型创建/修改 skill（默认 false）
+  allowLlmWrite: true            # 是否允许主模型创建/修改 skill（默认 true；按需改为 false 只读）
                                  #   false: <skill_tools> 只注入只读工具（search/list/view/files_read）
                                  #          /skill-bridge 拒绝写操作返回 403
                                  #   true:  <skill_tools> 注入全部工具（含写操作 create/update/delete 等）
