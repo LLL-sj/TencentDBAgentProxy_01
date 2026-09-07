@@ -282,7 +282,34 @@ docker exec tdai-proxy tail -n 50 /data/tdai-memory-proxy/logs/2026-09-07.jsonl
 docker exec tdai-proxy sh -c "grep '\"event\":\"usage\"' /data/tdai-memory-proxy/logs/2026-09-07.jsonl | tail"
 ```
 
-如果仍要启用 ClickHouse 写入，需先恢复镜像与容器：`docker load -i /root/tdai-memory/images/clickhouse.tar.gz`，将 `.env` 的 `CLICKHOUSE_ENABLED` 改回 `1`，执行 `./start-infra.sh` 后重启 `tdai-proxy`；关闭它只是停止新写入，不会删除已存在的 ClickHouse 数据。
+### 4.6 ClickHouse 当前运维（停用 / 恢复 / 清理）
+
+- **当前状态（2026-09-07 后）**
+  - `.env` 设 `CLICKHOUSE_ENABLED=0`，Proxy 不再写 ClickHouse。
+  - `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像已按用户确认移除。
+  - `tdai-clickhouse-data` 数据卷与 `/root/tdai-memory/images/clickhouse.tar.gz` 仍保留，可恢复。
+- **日常检查**
+  ```bash
+  docker ps --filter name=tdai-clickhouse      # 预期为空
+  docker images | grep clickhouse              # 预期为空
+  docker volume ls | grep clickhouse-data      # 应保留
+  ls -lh /root/tdai-memory/images/clickhouse.tar.gz
+  ```
+- **恢复 ClickHouse 统计写入**
+  ```bash
+  # 服务器上先加载离线镜像（保留的数据卷会自动继续使用）
+  docker load -i /root/tdai-memory/images/clickhouse.tar.gz
+
+  # 改 .env：CLICKHOUSE_ENABLED=1
+  cd /root/tdai-memory/deploy/global-images
+  ./start-infra.sh    # 重建 tdai-clickhouse 容器
+  ./start-proxy.sh    # 让 Proxy 重新写 ClickHouse
+  ```
+  注意：关闭它只是停止新写入，不会删除已存在的 ClickHouse 数据。
+- **彻底清理边界**
+  - 当前已删除的是容器和镜像，不是历史数据卷。
+  - 如需连 `tdai-clickhouse-data` 一起删除，必须由用户再次确认，不能直接 `--purge`。
+  - 当前统计已走 4.5 的轻量 JSONL，不需要擅自重新启用 ClickHouse。
 
 ## 5. 数据持久化与服务器独立性
 
