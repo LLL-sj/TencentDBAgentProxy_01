@@ -247,7 +247,40 @@ docker logs tdai-memory-hub | grep -E 'ERROR|WARN|404'
 | ClickHouse Web UI | `http://<新服务器IP>:28123/play` | 查看/查询用量日志（用户/密码在 `.env`） |
 | Redis GUI | `<新服务器IP>:26379` | RESP.app 等客户端连接，密码在 `.env` |
 | Proxy 日志 | `docker logs -f tdai-proxy` | 请求转发、耗时、错误 |
-| Proxy 文件日志 | 容器内 `/data/tdai-memory-proxy/logs/proxy.log` | 历史文件日志 |
+| Proxy 文件日志 | 容器内 `/data/tdai-memory-proxy/logs/proxy.log` | 结构化 JSONL：`request.timing` 等 |
+
+> ClickHouse 当前不作为新统计写入目标：高频小批量 INSERT 曾造成 ClickHouse CPU 高占用。现改为 Proxy 本地轻量 JSONL 日志；如仍有历史 ClickHouse 查询需求，可用原入口查询存量数据。
+
+### 4.5 Token / 耗时查询（轻量日志）
+
+Proxy 启用本地结构化日志后，默认写入 proxy 数据卷：
+
+```text
+/data/tdai-memory-proxy/logs/proxy.log            # 耗时统计，一行一个 JSON
+/data/tdai-memory-proxy/logs/YYYY-MM-DD.jsonl     # Token 用量日志，一行一个 JSON
+```
+
+快速查看 Token 与耗时汇总：
+
+```bash
+docker exec tdai-proxy node /app/scripts/query_usage_stats.mjs /data/tdai-memory-proxy/logs
+```
+
+手工查耗时：
+
+```bash
+docker exec tdai-proxy tail -n 100 /data/tdai-memory-proxy/logs/proxy.log
+docker exec tdai-proxy grep 'request.timing' /data/tdai-memory-proxy/logs/proxy.log | tail
+```
+
+手工查 Token 用量：
+
+```bash
+docker exec tdai-proxy tail -n 50 /data/tdai-memory-proxy/logs/2026-09-07.jsonl
+docker exec tdai-proxy sh -c "grep '\"event\":\"usage\"' /data/tdai-memory-proxy/logs/2026-09-07.jsonl | tail"
+```
+
+如果仍要启用 ClickHouse 写入，将 `.env` 的 `CLICKHOUSE_ENABLED` 改回 `1` 并重启 `tdai-proxy`；关闭它只是停止新写入，不会删除已存在的 ClickHouse 数据。
 
 ## 5. 数据持久化与服务器独立性
 
@@ -257,7 +290,7 @@ docker logs tdai-memory-hub | grep -E 'ERROR|WARN|404'
 |---|---|---|
 | `tdai-memory-core-data` | `/data/tdai-memory` | L0-L3、SQLite、JSONL、project/topics、checkpoint |
 | `tdai-panel-data` | `/data/knowledge` | Knowledge SQLite、Wiki、日志、panel 配置 |
-| `tdai-proxy-data` | `/data/tdai-memory-proxy` | proxy SQLite：sessions、hook_cache、tips_reminder_state |
+| `tdai-proxy-data` | `/data/tdai-memory-proxy` | proxy SQLite：sessions、hook_cache、tips_reminder_state、`logs/proxy.log`、`logs/*.jsonl` |
 | `tdai-clickhouse-data` | `/var/lib/clickhouse` | ClickHouse 用量日志数据 |
 | `tdai-postgres-data` | `/var/lib/postgresql/data` | Langfuse 的 PostgreSQL 数据 |
 
