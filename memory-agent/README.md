@@ -15,10 +15,11 @@
 | `L0_ROUTING_AND_EXTRACTION.md` | Codex/Claude Code 的 L0 路由与 User/Assistant 抽取规则 | 排查 L0 污染/抽取问题时读 |
 | `TEAM_NOTES.md` | Team Notes 机制：定位、功能、数据模型、接口、编码校验、写权限 | 排查 Team Notes 问题时读 |
 | `MAINTENANCE_AND_CHANGELOG.md` | **历史修改与交接的唯一档案**：全部轮次、经验与坑、剩余问题 | 查历史背景/剩余待办时读 |
+| `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md` | **后续记忆/Skill 统一方案指导**：L0-L3 与 Skill 同构、per-mode 参数、L3 拆分等 | 准备推进记忆/Skill 架构改造前读 |
 | `ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`）：第一阶段部署/Codex 接入/L0 guard 等问题与解决 | 排查同类问题时读 |
 | `prompts/` | chat / code / code-v2 / shared 提示词与说明 | 修改提示词时读 |
 
-> 此前散落在本目录的 `NEW_AGENT_HANDOFF*`、`HANDOFF_*`、执行计划、报告、评审请求等临时交接文档已整理并入 `MAINTENANCE_AND_CHANGELOG.md`。更细粒度的过程文件可在 Git history 中找回。
+> 此前散落在本目录的 `NEW_AGENT_HANDOFF*`、`HANDOFF_*`、执行计划、报告、评审请求等临时交接文档已整理并入 `MAINTENANCE_AND_CHANGELOG.md`。其中 `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md` 是后续架构方案指导，予以保留。更细粒度的过程文件可在 Git history 中找回。
 
 ## 2. 推荐阅读顺序
 
@@ -60,6 +61,7 @@ memory-agent/
 ├── L0_ROUTING_AND_EXTRACTION.md              # L0 路由与抽取
 ├── TEAM_NOTES.md                             # Team Notes 机制
 ├── MAINTENANCE_AND_CHANGELOG.md              # 历史修改与交接档案（原 FINAL.md）
+├── INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md  # 后续记忆/Skill 统一方案指导
 ├── ISSUES_AND_RESOLUTIONS.md                 # 问题汇总与排障（原 问题汇总.md）
 └── prompts/                                  # chat/code/code-v2/shared 提示词
     ├── README.md
