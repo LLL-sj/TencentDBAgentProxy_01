@@ -191,3 +191,25 @@ memory:
 - `memory_mode = all` 会同时跑 chat/code 两条链，参数选择要明确：建议在 L1/L2/L3 调度入口按实际执行分支选择 chat 或 code 参数，而不是把 `all` 当成第三种参数集。
 - 涉及 L3/Skill 文件结构变更前先确认历史数据迁移与 UI 权限口径。
 - 完成后按 `MAINTENANCE_AND_CHANGELOG.md` 记录规范追加简洁结论。
+
+---
+
+## 8. 2026-09-08 追加：L0 数据质量侧已完成事项（非 3.x 参数主线）
+
+> 本文 3.x 主线（per-mode 配置 / L3 依据 / L2/Skill 统一）**仍未完成**；以下是与主线平行的近期已完成事项，供后续继续接手时参考。
+
+### 8.1 Codex Ambient Suggestions 污染 L0 已过滤并部署
+
+- **问题**：Codex Desktop 的 ambient suggestions 功能会携带与真实会话相同的 `team/agent/user/task` 身份头，向 Memory Proxy 发一条“生成个性化建议”的后台请求；因内容包含大量旧任务历史，L0/L1 里会多出看似旧会话复活的污染 session。
+- **已实现**：
+  - `MemoryProxy/src/tdai/recorder.ts`：`isCodexInternalPrompt()` 在匹配前缀前会剥离首个 Markdown 标题，从而同时支持 `# Overview\n\nGenerate 0 to 3...` 完整前缀和 `Generate 0 to 3...` 特征句前缀。
+  - `MemoryProxy/src/config.ts`、`MemoryProxy/config.example.yaml`、`deploy/global-images/start-proxy.sh`、`deploy/global-images/.env.example`：默认 `codexInternal.promptPrefixes` 已加入两条 Ambient 前缀。
+- **验证/部署**：
+  - TypeScript 编译通过；Ambient 样本验证为 `null`（不写 L0）；普通用户消息正常保留。
+  - 新 `agentmemory/memory-proxy:local` 镜像已构建并部署到远程，`tdai-proxy` healthy。
+  - Git commit：`1f8f7b7`，已推送 `origin/feat/server_team`。
+- **污染数据已清理**：
+  - 删除 session `01a07bd8-4de7-7e63-9089-fe9019acc249` 对应的 L0 3 条、L1 3 条、JSONL 与 checkpoint runner state。
+  - 真实会话 `01a07bd8-988f-7dd0-aab4-ab9be9301f97` 保留。
+  - 清理前备份：`/root/tdai-memory/backups/l0-cleanup-20260908-024410/`。
+- **后续可丰富**：按 `L0_ROUTING_AND_EXTRACTION_NEW.md` §6 继续抓真实 Ambient 请求 body，若找到结构信号可将文本前缀升级为结构判定。

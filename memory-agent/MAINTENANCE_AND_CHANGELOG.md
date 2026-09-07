@@ -1,7 +1,7 @@
 # MAINTENANCE_AND_CHANGELOG.md — TencentDB-Agent-Memory 历史修改与长期维护记录（原 FINAL.md）
 
-> 更新日期：2026-09-07
-> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入，并经用户确认移除容器/镜像及旧回滚镜像/tar 包，数据卷保留。
+> 更新日期：2026-09-08
+> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入，并经用户确认移除容器/镜像及旧回滚镜像/tar 包，数据卷保留；Codex Ambient Suggestions L0 过滤已部署，污染 L0/L1 已清理。
 > Git：相关改动已提交并推送到 `feat/server_team`。
 > 本文是“历史修改 + 交接”的唯一档案。此前零散 handoff/执行计划/报告已清理，不再单独维护。
 >
@@ -155,6 +155,25 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 - 仍为 chat/code 共用全局参数；未做 per-mode 独立触发。
 - 后续较重任务：按 `memory_mode=chat|code` 拆分触发参数；L3 触发改由 L2 文件变化驱动；L2/Skill 统一“多文件维护模型”；L3 统一拆成索引自动重建 + LLM/用户维护总结。完整目标设计见 `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md`，实施交接见 `HANDOFF_MEMORY_PARAMETER_UNIFICATION_20260907.md`。
 
+### 3.15 Codex Ambient Suggestions 过滤与 L0/L1 污染清理
+
+> 日期：2026-09-08；范围：MemoryProxy L0 内部请求过滤 + 历史污染数据清理 + 部署。
+
+- **问题**：Codex Desktop ambient suggestions 后台请求与真实会话使用同一套 `team/agent/user/task` 身份头；请求内容以 `# Overview` + `Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex...` 开头，并包含大量旧任务历史，导致 L0/L1 出现“伪新 session”。
+- **代码/配置修改**：
+  - `MemoryProxy/src/tdai/recorder.ts`：`isCodexInternalPrompt()` 增加“先剥首个 Markdown 标题再匹配”的逻辑，使 `Generate 0 to 3...` 特征句前缀也能命中当前 `# Overview` 开头格式。
+  - `MemoryProxy/src/config.ts`、`MemoryProxy/config.example.yaml`、`deploy/global-images/start-proxy.sh`、`deploy/global-images/.env.example`：默认 `codexInternal.promptPrefixes` 加入：
+    - `# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex`
+    - `Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex`
+- **验证**：TypeScript 编译通过；Ambient 样本返回 `null`（不写 L0）；普通用户消息正常保留；YAML 解析通过。
+- **部署**：新 `agentmemory/memory-proxy:local` 镜像 `5d6c8eceb473` 已构建、上传远程、`tdai-proxy` 已重启 healthy；远程 config 已包含新增前缀。Git commit `1f8f7b7` 已推送 `origin/feat/server_team`。
+- **数据清理**：
+  - 删除污染 session `01a07bd8-4de7-7e63-9089-fe9019acc249` 的 L0 3 条、L1 3 条；
+  - 同步清理 SQLite `l0_conversations/l1_records/l1_fts`、`conversations/*.jsonl`、`records/*.jsonl`、`checkpoint.json`；
+  - 真实会话 `01a07bd8-988f-7dd0-aab4-ab9be9301f97` 保留；
+  - 清理前备份：`/root/tdai-memory/backups/l0-cleanup-20260908-024410/`。
+- **剩余事项**：仍建议按 `L0_ROUTING_AND_EXTRACTION_NEW.md` 抓 Ambient 原始 body，尝试将文本前缀升格为结构信号；旧的 WebSearch 等污染问题仍按 §5.1 继续处理。
+
 ---
 
 ## 4. 经验与坑（已解决）
@@ -172,6 +191,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 11. **hub 前端只 `docker cp` 会随容器重建回退**：最终必须把前端 build 打进 hub 镜像。
 12. **本地源码挂载不能带到服务器**：镜像重建后必须可无源码运行；部署脚本用 `TDAI_DEV_SOURCE_MOUNTS` 切换。
 13. **ClickHouse 不适合当前小规模高频逐请求小写入**：如只做轻量 Token/耗时统计，使用 Proxy 数据卷 JSONL + 脚本即可，避免 ClickHouse 压缩/merge 的 CPU 开销。
+14. **Codex Ambient Suggestions 会伪装成“旧会话复活”污染 L0**：它不是旧 session 被重放，而是后台自动建议把旧任务历史作为上下文生成一条新请求；若请求走同一代理身份头，必须加内部请求过滤或禁用该功能。
 
 ---
 
