@@ -1,9 +1,9 @@
 # MAINTENANCE_AND_CHANGELOG.md — TencentDB-Agent-Memory 历史修改与长期维护记录（原 FINAL.md）
 
-> 更新日期：2026-08-27
-> 状态：三容器 healthy；三个镜像已从当前源码重建并完成冒烟；proxy 数据卷挂载已修复。
-> Git：功能改动仍未 commit（本地分支 `feat/server_team`）。
-> 当前最新交接：`NEW_AGENT_HANDOFF11.md`。
+> 更新日期：2026-09-07
+> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入并停止容器。
+> Git：相关改动已提交并推送到 `feat/server_team`。
+> 当前最新交接：`HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md`。
 >
 > 说明：本文位于 `memory-agent/`，以下文件路径均相对本文所在目录（`memory-agent/`）。
 
@@ -15,7 +15,8 @@
 |---|---|
 | `CURRENT_STATUS_功能实现与当前阶段.md` | 当前阶段总览：功能实现 / 目前阶段（先读） |
 | `AGENT_INDEX.md` | **部署与运维唯一入口**：服务器部署、重启、挂载、日志、升级、排障 |
-| `NEW_AGENT_HANDOFF11.md` | 当前最新交接：镜像重建 / H-08 / 部署脚本 |
+| `HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md` | 当前最新交接：ClickHouse 停写、Proxy JSONL 日志、Token/耗时查询 |
+| `NEW_AGENT_HANDOFF11.md` | 上一轮：镜像重建 / H-08 / 部署脚本 |
 | `NEW_AGENT_HANDOFF10.md` | 上一轮：Codex Responses + L0 内部请求过滤 |
 | `MEMORY_MECHANISM.md` | 记忆机制最终口径 |
 | `L0_ROUTING_AND_EXTRACTION.md` | Codex / Claude Code 的 L0 路由与 User/Assistant 抽取 |
@@ -97,6 +98,15 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 - **部署修复**：`start-proxy.sh` 恢复 `PROXY_VOLUME` 挂载；`TDAI_DEV_SOURCE_MOUNTS` 支持服务器模式；`stop-all.sh --purge` 包含 proxy 卷；时区/重启策略可配。
 - **镜像**：三个 `:local` 镜像从当前源码重建，已运行验证；`docker save` 导出 `../backups/tdai-images-local-20260827.tar.gz`。
 
+### 3.11 第十二轮：ClickHouse 停写与 Proxy 轻量 JSONL 日志（当前轮）
+
+- **ClickHouse 高频小 INSERT 导致 CPU 高占用**：每个请求写 `usage_logs` + `usage_raw` + `request_stage_timings`，其中 credit report 失败还额外写一条 `report_failed`。
+- **决策**：不再让 ClickHouse 承担当前小规模统计写入；改为 Proxy 本地 JSONL 日志。
+- **Proxy 文件日志**：`report/file-logger.ts` 改为纯 JSONL；`start-proxy.sh` 默认 `PROXY_LOG_FILE=/data/tdai-memory-proxy/logs`。
+- **查询脚本**：新增 `MemoryProxy/scripts/query_usage_stats.mjs`，可统计 Token/耗时/P50/P90。
+- **远程状态**：`CLICKHOUSE_ENABLED=0`，`tdai-proxy` 已重启到新镜像，`tdai-clickhouse` 已停止但数据卷保留。
+- **Git**：提交并推送 `feat/server_team`。
+
 ---
 
 ## 4. 经验与坑（已解决）
@@ -113,6 +123,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 10. **Codex 扁平工具会被上游拒绝**：proxy 对 Chat Completions 包装、对 Responses 保持扁平并剔除无 `name` 工具。
 11. **hub 前端只 `docker cp` 会随容器重建回退**：最终必须把前端 build 打进 hub 镜像。
 12. **本地源码挂载不能带到服务器**：镜像重建后必须可无源码运行；部署脚本用 `TDAI_DEV_SOURCE_MOUNTS` 切换。
+13. **ClickHouse 不适合当前小规模高频逐请求小写入**：如只做轻量 Token/耗时统计，使用 Proxy 数据卷 JSONL + 脚本即可，避免 ClickHouse 压缩/merge 的 CPU 开销。
 
 ---
 
@@ -137,8 +148,8 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 
 ### 5.3 部署与发布
 
-1. 功能改动仍未 git commit；原仓库无 push 权限，计划推到用户自建 private 仓库。
-2. 服务器部署尚未执行；需按 `AGENT_INDEX.md` 第 2 章初始化独立 `.env`/数据卷/admin key。
+1. 当前功能改动已 git commit 并推送到 `origin/feat/server_team`。
+2. 远程已执行 Proxy 轻量 JSONL 日志部署并停止 ClickHouse 新写入；若还需同步其它 core/hub 最近改动，按 `AGENT_INDEX.md` 部署章节执行。
 3. 服务器应使用 `TDAI_DEV_SOURCE_MOUNTS=0`、`unless-stopped`、`Asia/Shanghai`。
 4. 后续代码升级走新镜像 tag + 保留原数据卷，不拷贝本机 `.env`/volume。
 
