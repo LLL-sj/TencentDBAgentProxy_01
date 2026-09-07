@@ -1,7 +1,7 @@
 # MAINTENANCE_AND_CHANGELOG.md — TencentDB-Agent-Memory 历史修改与长期维护记录（原 FINAL.md）
 
 > 更新日期：2026-09-07
-> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入并停止容器。
+> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入，并经用户确认移除容器/镜像，数据卷与离线包保留。
 > Git：相关改动已提交并推送到 `feat/server_team`。
 > 当前最新交接：`HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md`。
 >
@@ -104,8 +104,9 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 - **决策**：不再让 ClickHouse 承担当前小规模统计写入；改为 Proxy 本地 JSONL 日志。
 - **Proxy 文件日志**：`report/file-logger.ts` 改为纯 JSONL；`start-proxy.sh` 默认 `PROXY_LOG_FILE=/data/tdai-memory-proxy/logs`。
 - **查询脚本**：新增 `MemoryProxy/scripts/query_usage_stats.mjs`，可统计 Token/耗时/P50/P90。
-- **远程状态**：`CLICKHOUSE_ENABLED=0`，`tdai-proxy` 已重启到新镜像，`tdai-clickhouse` 已停止但数据卷保留。
-- **Git**：提交并推送 `feat/server_team`。
+- **远程状态**：`CLICKHOUSE_ENABLED=0`，`tdai-proxy` 已重启到新镜像。
+- **后续清理（用户确认后）**：远程移除已停止的 `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像，释放约 807MB；`tdai-clickhouse-data` 数据卷与 `/root/tdai-memory/images/clickhouse.tar.gz` 保留，可随时恢复。
+- **Git**：相关改动已提交并推送 `feat/server_team`。
 
 ---
 
@@ -149,7 +150,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 ### 5.3 部署与发布
 
 1. 当前功能改动已 git commit 并推送到 `origin/feat/server_team`。
-2. 远程已执行 Proxy 轻量 JSONL 日志部署并停止 ClickHouse 新写入；若还需同步其它 core/hub 最近改动，按 `AGENT_INDEX.md` 部署章节执行。
+2. 远程已执行 Proxy 轻量 JSONL 日志部署并停止 ClickHouse 新写入，随后经用户确认移除 `tdai-clickhouse` 容器/镜像；`tdai-clickhouse-data` 与 `/root/tdai-memory/images/clickhouse.tar.gz` 仍保留。若需恢复 ClickHouse，按 `HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md` 第 8 节执行。若还需同步其它 core/hub 最近改动，按 `AGENT_INDEX.md` 部署章节执行。
 3. 服务器应使用 `TDAI_DEV_SOURCE_MOUNTS=0`、`unless-stopped`、`Asia/Shanghai`。
 4. 后续代码升级走新镜像 tag + 保留原数据卷，不拷贝本机 `.env`/volume。
 

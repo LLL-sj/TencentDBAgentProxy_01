@@ -29,6 +29,8 @@
 
 启动脚本都在 `deploy/global-images/`：`start-infra.sh` 启动 Redis/ClickHouse/Postgres/Langfuse；`start-all.sh` 启动 TDAI 三件套。数据卷为 `tdai-clickhouse-data`、`tdai-postgres-data`。
 
+> **当前服务器 ClickHouse 状态**：为降低高频小写入带来的 CPU 压力，Proxy 已改为本地 JSONL 日志，`.env` 设 `CLICKHOUSE_ENABLED=0`；后经用户确认已移除 `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像。`tdai-clickhouse-data` 数据卷与 `/root/tdai-memory/images/clickhouse.tar.gz` 仍保留，需要时可按 2.5/4.5 与最新 handoff 恢复。
+
 ---
 
 ## 2. 服务器首次部署
@@ -244,12 +246,12 @@ docker logs tdai-memory-hub | grep -E 'ERROR|WARN|404'
 |---|---|---|
 | TDAI Panel | `http://<新服务器IP>:28125` | 管理团队/Agent/Task/记忆/Team Notes |
 | Langfuse UI | `LANGFUSE_PUBLIC_URL` 配置的地址 | 查看 LLM Trace/耗时/输入输出 |
-| ClickHouse Web UI | `http://<新服务器IP>:28123/play` | 查看/查询用量日志（用户/密码在 `.env`） |
+| ClickHouse Web UI | `http://<新服务器IP>:28123/play` | 查看/查询历史日志（当前服务器已移除镜像；需恢复后可用） |
 | Redis GUI | `<新服务器IP>:26379` | RESP.app 等客户端连接，密码在 `.env` |
 | Proxy 日志 | `docker logs -f tdai-proxy` | 请求转发、耗时、错误 |
 | Proxy 文件日志 | 容器内 `/data/tdai-memory-proxy/logs/proxy.log` | 结构化 JSONL：`request.timing` 等 |
 
-> ClickHouse 当前不作为新统计写入目标：高频小批量 INSERT 曾造成 ClickHouse CPU 高占用。现改为 Proxy 本地轻量 JSONL 日志；如仍有历史 ClickHouse 查询需求，可用原入口查询存量数据。
+> ClickHouse 当前不作为新统计写入目标：高频小批量 INSERT 曾造成 ClickHouse CPU 高占用。现改为 Proxy 本地轻量 JSONL 日志；远程已移除 ClickHouse 容器/镜像，但 `tdai-clickhouse-data` 数据卷仍保留；如仍有历史 ClickHouse 查询需求，需先从离线包恢复镜像再查询存量数据。
 
 ### 4.5 Token / 耗时查询（轻量日志）
 
@@ -280,7 +282,7 @@ docker exec tdai-proxy tail -n 50 /data/tdai-memory-proxy/logs/2026-09-07.jsonl
 docker exec tdai-proxy sh -c "grep '\"event\":\"usage\"' /data/tdai-memory-proxy/logs/2026-09-07.jsonl | tail"
 ```
 
-如果仍要启用 ClickHouse 写入，将 `.env` 的 `CLICKHOUSE_ENABLED` 改回 `1` 并重启 `tdai-proxy`；关闭它只是停止新写入，不会删除已存在的 ClickHouse 数据。
+如果仍要启用 ClickHouse 写入，需先恢复镜像与容器：`docker load -i /root/tdai-memory/images/clickhouse.tar.gz`，将 `.env` 的 `CLICKHOUSE_ENABLED` 改回 `1`，执行 `./start-infra.sh` 后重启 `tdai-proxy`；关闭它只是停止新写入，不会删除已存在的 ClickHouse 数据。
 
 ## 5. 数据持久化与服务器独立性
 
