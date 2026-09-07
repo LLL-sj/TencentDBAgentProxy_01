@@ -422,12 +422,8 @@ docker tag agentmemory/memory-hub:local agentmemory/memory-hub:local-backup-YYYY
 | `memory-agent/MEMORY_MECHANISM.md` | 记忆机制最终口径 |
 | `memory-agent/L0_ROUTING_AND_EXTRACTION.md` | Codex/Claude Code L0 抽取 |
 | `memory-agent/TEAM_NOTES.md` | Team Notes 机制 |
-| `memory-agent/MAINTENANCE_AND_CHANGELOG.md` | 历史修改、经验、剩余问题（原 `FINAL.md`） |
+| `memory-agent/MAINTENANCE_AND_CHANGELOG.md` | **历史修改与交接的唯一档案**：历史轮次、经验、剩余问题（原 `FINAL.md`） |
 | `memory-agent/ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`） |
-| `memory-agent/HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md` | 本次交接：ClickHouse 停止统计写入、Proxy JSONL 日志、Token/耗时查询 |
-| `memory-agent/NEW_AGENT_HANDOFF11.md` | 上一轮镜像重建 / H-08 / 部署脚本交接 |
-| `memory-agent/NEW_AGENT_HANDOFF10.md` | 上一轮：Codex Responses + L0 内部请求过滤 |
-| `memory-agent/NEW_AGENT_HANDOFF6~9.md` | 历轮交接实施记录（需要历史背景时再看） |
 
 ### 8.2 部署与配置
 

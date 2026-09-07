@@ -14,14 +14,11 @@
 | `MEMORY_MECHANISM.md` | 记忆机制最终口径：L0/L0.5/L1/L2/L3、chat/code/all/none、触发节奏、注入块 | 需要理解记忆系统怎么工作时读 |
 | `L0_ROUTING_AND_EXTRACTION.md` | Codex/Claude Code 的 L0 路由与 User/Assistant 抽取规则 | 排查 L0 污染/抽取问题时读 |
 | `TEAM_NOTES.md` | Team Notes 机制：定位、功能、数据模型、接口、编码校验、写权限 | 排查 Team Notes 问题时读 |
-| `MAINTENANCE_AND_CHANGELOG.md` | 历史修改与长期维护记录（原 `FINAL.md`）：全部修改按轮次、经验与坑、剩余问题 | 查历史背景/剩余待办时读 |
+| `MAINTENANCE_AND_CHANGELOG.md` | **历史修改与交接的唯一档案**：全部轮次、经验与坑、剩余问题 | 查历史背景/剩余待办时读 |
 | `ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`）：第一阶段部署/Codex 接入/L0 guard 等问题与解决 | 排查同类问题时读 |
-| `NEW_AGENT_HANDOFF11.md` | 当前最新交接：镜像重建 / H-08 / 部署脚本整理 | 了解最近一轮实施细节时读 |
-| `NEW_AGENT_HANDOFF10.md` | 上一轮交接：Codex Responses + L0 内部请求过滤 | 需要上一轮背景时读 |
-| `NEW_AGENT_HANDOFF6.md` | 前六轮总交接与 code v2 完整背景 | 需要早期背景时读 |
-| `NEW_AGENT_HANDOFF7~9.md` | 第七至十轮实施记录 | 按需查看对应轮次 |
-| `NEW_AGENT_HANDOFF.md` / `NEW_AGENT_HANDOFF2~5.md` | 早期交接文档 | 一般不需要读，历史存档 |
 | `prompts/` | chat / code / code-v2 / shared 提示词与说明 | 修改提示词时读 |
+
+> 此前散落在本目录的 `NEW_AGENT_HANDOFF*`、`HANDOFF_*`、执行计划、报告、评审请求等临时交接文档已整理并入 `MAINTENANCE_AND_CHANGELOG.md`。更细粒度的过程文件可在 Git history 中找回。
 
 ## 2. 推荐阅读顺序
 
@@ -34,7 +31,6 @@
   5. L0_ROUTING_AND_EXTRACTION.md          ← L0 抽取口径
   6. TEAM_NOTES.md                         ← Team Notes 口径
   7. MAINTENANCE_AND_CHANGELOG.md          ← 历史修改与剩余问题
-  8. NEW_AGENT_HANDOFF11.md                ← 最近一轮实施细节
 
 查问题/排障：
   AGENT_INDEX.md 第 7 节
@@ -63,14 +59,8 @@ memory-agent/
 ├── MEMORY_MECHANISM.md                       # 记忆机制最终口径
 ├── L0_ROUTING_AND_EXTRACTION.md              # L0 路由与抽取
 ├── TEAM_NOTES.md                             # Team Notes 机制
-├── MAINTENANCE_AND_CHANGELOG.md              # 长期维护与历史修改（原 FINAL.md）
+├── MAINTENANCE_AND_CHANGELOG.md              # 历史修改与交接档案（原 FINAL.md）
 ├── ISSUES_AND_RESOLUTIONS.md                 # 问题汇总与排障（原 问题汇总.md）
-├── NEW_AGENT_HANDOFF.md                      # 早期交接（可忽略）
-├── NEW_AGENT_HANDOFF2~5.md                   # 早期交接（可忽略）
-├── NEW_AGENT_HANDOFF6.md                     # 前六轮总交接
-├── NEW_AGENT_HANDOFF7~9.md                   # 第七至十轮实施记录
-├── NEW_AGENT_HANDOFF10.md                    # 第十一轮交接
-├── NEW_AGENT_HANDOFF11.md                    # 当前最新交接（第十二轮维护）
 └── prompts/                                  # chat/code/code-v2/shared 提示词
     ├── README.md
     ├── chat/

@@ -3,11 +3,18 @@
 > 更新日期：2026-09-07
 > 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入，并经用户确认移除容器/镜像及旧回滚镜像/tar 包，数据卷保留。
 > Git：相关改动已提交并推送到 `feat/server_team`。
-> 当前最新交接：`HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md`。
+> 本文是“历史修改 + 交接”的唯一档案。此前零散 handoff/执行计划/报告已清理，不再单独维护。
 >
 > 说明：本文位于 `memory-agent/`，以下文件路径均相对本文所在目录（`memory-agent/`）。
 
 ---
+
+## 0. 维护记录规范
+
+- 只记录有实际影响的改动结果：改了什么、为什么、影响面、验证状态、剩余事项。
+- 每条记录应能支撑后续 Agent 直接判断“是否要做/是否已完成”，不搬运完整命令日志。
+- 历史 handoff / execution plan / report 不再单独保留；如需要更细粒度的过程，回 Git history 查看。
+- 新增修改时按轮次追加到第 3 节末尾，格式见已有条目。
 
 ## 1. 相关文件（先读这些）
 
@@ -15,15 +22,10 @@
 |---|---|
 | `CURRENT_STATUS_功能实现与当前阶段.md` | 当前阶段总览：功能实现 / 目前阶段（先读） |
 | `AGENT_INDEX.md` | **部署与运维唯一入口**：服务器部署、重启、挂载、日志、升级、排障 |
-| `HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md` | 当前最新交接：ClickHouse 停写、Proxy JSONL 日志、Token/耗时查询 |
-| `NEW_AGENT_HANDOFF11.md` | 上一轮：镜像重建 / H-08 / 部署脚本 |
-| `NEW_AGENT_HANDOFF10.md` | 上一轮：Codex Responses + L0 内部请求过滤 |
 | `MEMORY_MECHANISM.md` | 记忆机制最终口径 |
 | `L0_ROUTING_AND_EXTRACTION.md` | Codex / Claude Code 的 L0 路由与 User/Assistant 抽取 |
 | `TEAM_NOTES.md` | Team Notes 机制与编码校验 |
 | `ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`） |
-| `NEW_AGENT_HANDOFF6.md` | 前六轮总交接与 code v2 完整背景 |
-| `NEW_AGENT_HANDOFF7~9.md` | 第七至十轮实施记录 |
 | `../deploy/global-images/.env.example` | 全部部署参数模板 |
 | `../deploy/global-images/start-*.sh` / `stop-all.sh` | 启动、停止、卷管理脚本 |
 
@@ -108,6 +110,49 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 - **后续清理（用户确认后）**：远程移除已停止的 `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像，释放约 807MB；之后再次清理 `local-before-*` 回滚镜像与 `/root/tdai-memory/images/` 下全部 tar.gz，远程磁盘使用从约 16G 降到约 9.5G；`tdai-clickhouse-data` 数据卷保留。
 - **Git**：相关改动已提交并推送 `feat/server_team`。
 
+### 3.12 第十三轮：L0 Session 化 + 记忆/Skill CRUD + Agent 受控写（A-E）
+
+> 日期：2026-09-07；范围：阶段 A/B/C/D/E；已同步到远程并验证。
+
+- **A：L0 Session 化**
+  - Core/TCVDB 新增 `listL0Sessions()`；新增 `/v3/conversation/sessions`。
+  - Panel `/chat-memory/l0-sessions`；Chat/Code L0 均按 session 列表 + 当前 session 消息展示，旧无 session 数据归默认 session。
+- **B：Chat L2/L3 + Skill UI**
+  - Chat L2 可编辑/删除，Chat L3 可编辑不删除；权限仅 asset owner。
+  - Skill 面板支持编辑 SKILL.md、删除 Skill、在线编辑/删除已有文本文件。
+- **C：Code L2/L3 CRUD**
+  - Core 新增 `/v3/project/write|rm`，路径沙箱限制扁平 `project/topics/*.md`，写/删后自动重建 `project/MEMORY.md`。
+  - Panel 新增 `/api/v1/project/write|delete`；Code L2 UI 暴露 owner 编辑/删除。
+- **D：Agent 受控写**
+  - Proxy `memory-bridge` 拆成读/写 allowlist；开放 `scenario/write|rm`、`core/write`、`project/write|rm`，写操作强制 self-only。
+  - `<tdai_memory_tools>` 更新为读 + 受控写说明；`skillRuntime.allowLlmWrite` 默认开启。
+- **E：镜像**
+  - 三个 `:local` 镜像从当前源码重建并部署远程。
+- **权限口径**：Chat/Code L2、Chat L3 面板写操作仅限 owner；Skill 共享=团队只读，修改/删除仅 owner，非 owner 后端返回 `SKILL_NOT_OWNER`。
+- **未完成**：Code L3 手动编辑未做；Skill 启用/停用未做；Skill 源更新后 Fork 副本同步机制未做；Code L2 并发锁目前仅进程内；前端非 owner 的 Skill 编辑按钮仍显示。
+
+### 3.13 Proxy 分阶段耗时统计与异步收尾
+
+> 日期：2026-09-07；范围：MemoryProxy 耗时统计、流式 EOF、非流式 L0 异步。
+
+- 新增 Proxy 侧请求阶段耗时统计，记录 `request.timing`/ClickHouse `request_stage_timings`；字段含 total、local_prepare、upstream_ttfb、upstream_stream、proxy_tail、client_network_tail、postprocess。
+- OpenAI 流式 EOF 改为先 `controller.close()` 再异步 finalize，避免后处理阻塞客户端结束。
+- OpenAI 非流式 L0 改为 `trackWrite()` 异步执行，与流式行为一致。
+- 后续 ClickHouse 停写后，这些耗时改由本地 `proxy.log` + `query_usage_stats.mjs` 统计，见 3.11 与 `AGENT_INDEX.md` 4.5。
+- 已知：`postprocess_ms` 基本为 0，因为 timing 在 Node `finish` 时发出，异步后处理更晚。
+
+### 3.14 记忆触发参数微调与统一方案交接
+
+> 日期：2026-09-07；范围：L1/L2/L3/Skill 触发参数。
+
+- 已改并部署：
+  - L1 单批 L0：`10 → 25`（`L1_BATCH_PROCESS=25`）
+  - L1 单次最多：`10` 条
+  - Skill：`toolCallThreshold=15`、`archiveBytes=61440`
+  - 远程 `.env`：`MEMORY_L1_IDLE_TIMEOUT_SECONDS=300`、`MEMORY_L2_DELAY_AFTER_L1_SECONDS=120`、`MEMORY_SESSION_ACTIVE_WINDOW_HOURS=2`、`MEMORY_L3_TRIGGER_EVERY_N=7`
+- 仍为 chat/code 共用全局参数；未做 per-mode 独立触发。
+- 后续较重任务：按 `memory_mode=chat|code` 拆分触发参数；L3 触发改由 L2 文件变化驱动；L2/Skill 统一“多文件维护模型”；L3 统一拆成索引自动重建 + LLM/用户维护总结。
+
 ---
 
 ## 4. 经验与坑（已解决）
@@ -137,6 +182,15 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 3. `summary_tips` 暂无删除接口；误提交只能手工处理。
 4. L1 未落 `memory_mode` 字段，面板暂按 type 过滤。
 5. `projectMemory.minPendingTips/minDistinctSessions/packagerMaxIntervalSeconds` 解析但 packager 未完全使用。
+6. L1/L2/L3 触发仍是 chat/code 共用全局参数；待按 `memory_mode` 独立配置。
+7. L3 触发当前依赖 L1 条数，后续应改为 L2 文件变化驱动。
+8. L2/Skill 未统一成同一套“多文件维护”参数与规则；Skill 缺数量上限、单文件 token/总预算、强制合并。
+9. L3 未统一拆成“自动索引 + 总结”两部分；chat L3 缺索引，code L3 缺 LLM 总结。
+10. L1 warmup 尚未从 `1→2→4→5` 改为 `2→5`。
+11. Code L3 当前只读、随 L2 自动重建，无手动编辑入口。
+12. Skill 缺少启用/停用开关；团队共享 Skill 与 Fork 副本之间无源更新同步机制。
+13. Code L2 并发锁为进程内锁，多副本部署需补分布式锁。
+14. Skill UI 对非 owner 仍显示编辑/删除按钮，应改为按 owner 隐藏（待确认 UI 问题）。
 
 ### 5.2 日志噪音（不影响功能，影响运维观感）
 
@@ -150,7 +204,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
 ### 5.3 部署与发布
 
 1. 当前功能改动已 git commit 并推送到 `origin/feat/server_team`。
-2. 远程已执行 Proxy 轻量 JSONL 日志部署并停止 ClickHouse 新写入，随后经用户确认移除 `tdai-clickhouse` 容器/镜像，并删除 `local-before-*` 回滚镜像与 `/root/tdai-memory/images/*.tar.gz`；`tdai-clickhouse-data` 数据卷仍保留，但本地已无 ClickHouse 离线包。若需恢复 ClickHouse，需从外部源/备份重新获取镜像，并按 `HANDOFF_CLICKHOUSE_LIGHTWEIGHT_LOGS_20260907.md` 第 8 节执行。若还需同步其它 core/hub 最近改动，按 `AGENT_INDEX.md` 部署章节执行。
+2. 远程已执行 Proxy 轻量 JSONL 日志部署并停止 ClickHouse 新写入，随后经用户确认移除 `tdai-clickhouse` 容器/镜像，并删除 `local-before-*` 回滚镜像与 `/root/tdai-memory/images/*.tar.gz`；`tdai-clickhouse-data` 数据卷仍保留，但本地已无 ClickHouse 离线包。若需恢复 ClickHouse，需从外部源/备份重新获取镜像，并按其 `AGENT_INDEX.md` 4.6 的恢复步骤执行。若还需同步其它 core/hub 最近改动，按 `AGENT_INDEX.md` 部署章节执行。
 3. 服务器应使用 `TDAI_DEV_SOURCE_MOUNTS=0`、`unless-stopped`、`Asia/Shanghai`。
 4. 后续代码升级走新镜像 tag + 保留原数据卷，不拷贝本机 `.env`/volume。
 
