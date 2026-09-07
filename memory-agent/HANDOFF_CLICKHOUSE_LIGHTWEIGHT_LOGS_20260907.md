@@ -2,7 +2,7 @@
 
 > 日期：2026-09-07
 > 分支：`feat/server_team`
-> 状态：已完成本地代码修改、镜像构建、远程部署与验证；后经用户确认清理了 ClickHouse 容器/镜像，保留数据卷与离线包。
+> 状态：已完成本地代码修改、镜像构建、远程部署与验证；后经用户确认清理了 ClickHouse 容器/镜像，并清理旧回滚镜像与离线 tar 包，保留数据卷。
 > 关联文档：
 > - `AGENT_INDEX.md`（运维入口，新增 4.5 Token/耗时查询）
 > - `HANDOFF_TIMING_STATISTICS_20260907.md`（耗时统计来源背景）
@@ -12,7 +12,7 @@
 
 ## 1. 一句话结论
 
-ClickHouse 在当前规模下被高频小批量 INSERT 打高 CPU。已不再作为 Proxy 的主动统计写入目标，改为 Proxy 本地轻量 JSONL 日志 + Node 查询脚本；原 ClickHouse 数据卷保留，远程容器/镜像已按用户确认移除，离线包可恢复。
+ClickHouse 在当前规模下被高频小批量 INSERT 打高 CPU。已不再作为 Proxy 的主动统计写入目标，改为 Proxy 本地轻量 JSONL 日志 + Node 查询脚本；原 ClickHouse 数据卷保留，远程容器/镜像及旧离线 tar 包已按用户确认清理。
 
 ---
 
@@ -79,6 +79,7 @@ node MemoryProxy/scripts/query_usage_stats.mjs /path/to/logs
 4. 重启 `tdai-proxy`。
 5. `docker stop tdai-clickhouse`：停止 ClickHouse 容器，保留 `tdai-clickhouse-data` 数据卷。
 6. 经用户确认后清理：`docker rm tdai-clickhouse && docker rmi clickhouse/clickhouse-server:24.8`，释放约 807MB。
+7. 经用户确认后再次清理：删除 `local-before-*` 回滚镜像与 `/root/tdai-memory/images/` 下全部 tar.gz，远程磁盘使用从约 16G 降到约 9.5G。
 
 远程验证结果：
 
@@ -87,7 +88,7 @@ node MemoryProxy/scripts/query_usage_stats.mjs /path/to/logs
 - 发送测试请求后生成了 `proxy.log` 与当日 `.jsonl`
 - 执行查询脚本成功输出 Token/耗时统计
 - ClickHouse 日志中无新 INSERT
-- 清理后 `tdai-clickhouse` 容器/镜像不存在；`tdai-clickhouse-data` 数据卷和 `/root/tdai-memory/images/clickhouse.tar.gz` 保留
+- 清理后 `tdai-clickhouse` 容器/镜像不存在，`local-before-*` 回滚镜像和 `/root/tdai-memory/images/*.tar.gz` 也已删除；`tdai-clickhouse-data` 数据卷保留
 
 ---
 
@@ -99,6 +100,7 @@ node MemoryProxy/scripts/query_usage_stats.mjs /path/to/logs
 | `tdai-memory-hub` | healthy，当前镜像 |
 | `tdai-proxy` | healthy，新 JSONL 日志镜像 |
 | `tdai-clickhouse` | **已移除容器和镜像**（数据卷保留） |
+| 旧回滚镜像 / tar 包 | **已清理**（`local-before-*` 与 `/root/tdai-memory/images/*.tar.gz` 已删除） |
 | Proxy 新统计 | 写入 `/data/tdai-memory-proxy/logs` |
 | ClickHouse 新统计 | 不再写入 |
 
@@ -106,16 +108,17 @@ node MemoryProxy/scripts/query_usage_stats.mjs /path/to/logs
 
 ## 6. 遗留事项 / 后续可做
 
-1. **旧镜像与 tar 包清理**
+1. **旧镜像与 tar 包清理（已完成）**
    - 已执行 `docker image prune -f`，清掉无 tag 旧 proxy 镜像，释放约 374.6MB。
-   - 服务器仍保留 `local-before-*` 回滚镜像与 `/root/tdai-memory/images/` 多个 tar.gz（约 2.7GB）。删除前需用户确认。
+   - 后经用户确认删除 `local-before-*` 回滚镜像与 `/root/tdai-memory/images/` 下全部 tar.gz；当前 `/root/tdai-memory/images/` 为空。
 2. **CREDIT_REPORT 日志噪音**
    - `CREDIT_REPORT ... fetch failed` 仍会写进 `proxy.log`，但现在不会写 ClickHouse。
    - 若想消除日志噪音，后续可在配置中显式关闭 credit report。
 3. **ClickHouse 容器/镜像已移除，数据卷保留**
    - 当前不再运行 ClickHouse，也不需要镜像；`tdai-clickhouse-data` 数据卷仍保留。
+   - `/root/tdai-memory/images/` 下 ClickHouse/Redis/Postgres/Langfuse/TDAI 的 tar.gz 已按用户确认全部清理。
    - 如需彻底删除历史数据/卷，需要人工确认，不能直接 `--purge`。
-   - 若需恢复，可先从 `/root/tdai-memory/images/clickhouse.tar.gz` 加载镜像。
+   - 若确需恢复 ClickHouse，需要从外部源/备份重新获得离线镜像，当前服务器本地无该 tar 包。
 4. **已知 UI/权限问题仅记录不擅自改**
    - Skill UI 对非 owner 显示编辑/删除按钮仍是已知问题，本次未改。
 
@@ -135,7 +138,9 @@ grep -nE '^(CLICKHOUSE_ENABLED|PROXY_LOG_FILE)' .env
 docker ps --filter name=tdai-memory
 docker ps --filter name=tdai-clickhouse   # 预期为空
 # 镜像状态
-docker images | grep clickhouse   # 预期为空；离线包仍在 /root/tdai-memory/images/clickhouse.tar.gz
+docker images | grep clickhouse   # 预期为空
+# 离线包目录
+ls -lh /root/tdai-memory/images/ 2>/dev/null   # 当前预期为空/不存在
 
 # proxy 日志统计验证
 docker exec tdai-proxy node /app/scripts/query_usage_stats.mjs /data/tdai-memory-proxy/logs
@@ -150,10 +155,9 @@ docker exec tdai-proxy tail -n 20 /data/tdai-memory-proxy/logs/proxy.log
 ## 8. 回滚方法
 
 - 需要恢复 ClickHouse 统计：
-  - 先加载离线镜像：`docker load -i /root/tdai-memory/images/clickhouse.tar.gz`
+  - 先获取 ClickHouse 离线镜像（当前服务器 `/root/tdai-memory/images/` 已清理，需从外部源/备份重新获得），再执行 `docker load -i <离线镜像>`
   - 远程 `.env`：`CLICKHOUSE_ENABLED=1`
   - `cd /root/tdai-memory/deploy/global-images && ./start-infra.sh`（会重建 `tdai-clickhouse`，复用 `tdai-clickhouse-data` 数据卷）
   - `./start-proxy.sh`
 - 需要回退 proxy 镜像：
-  - 当前可回滚镜像 tag：`agentmemory/memory-proxy:local-before-cde-20260907`
-  - 将 `.env` 的 `PROXY_IMAGE` 指到该 tag，再 `./start-proxy.sh`
+  - 旧回滚 tag `agentmemory/memory-proxy:local-before-cde-20260907` 已删除；如需回退，需从外部备份重新导入对应旧镜像。

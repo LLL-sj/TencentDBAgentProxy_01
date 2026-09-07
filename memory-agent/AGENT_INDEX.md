@@ -29,7 +29,7 @@
 
 启动脚本都在 `deploy/global-images/`：`start-infra.sh` 启动 Redis/ClickHouse/Postgres/Langfuse；`start-all.sh` 启动 TDAI 三件套。数据卷为 `tdai-clickhouse-data`、`tdai-postgres-data`。
 
-> **当前服务器 ClickHouse 状态**：为降低高频小写入带来的 CPU 压力，Proxy 已改为本地 JSONL 日志，`.env` 设 `CLICKHOUSE_ENABLED=0`；后经用户确认已移除 `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像。`tdai-clickhouse-data` 数据卷与 `/root/tdai-memory/images/clickhouse.tar.gz` 仍保留，需要时可按 2.5/4.5 与最新 handoff 恢复。
+> **当前服务器 ClickHouse 状态**：为降低高频小写入带来的 CPU 压力，Proxy 已改为本地 JSONL 日志，`.env` 设 `CLICKHOUSE_ENABLED=0`；后经用户确认已移除 `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像，并清理旧回滚镜像与 `/root/tdai-memory/images/*.tar.gz`。`tdai-clickhouse-data` 数据卷仍保留；当前服务器本地没有 ClickHouse 离线包，确需恢复时需从外部源/备份重新获取。
 
 ---
 
@@ -251,7 +251,7 @@ docker logs tdai-memory-hub | grep -E 'ERROR|WARN|404'
 | Proxy 日志 | `docker logs -f tdai-proxy` | 请求转发、耗时、错误 |
 | Proxy 文件日志 | 容器内 `/data/tdai-memory-proxy/logs/proxy.log` | 结构化 JSONL：`request.timing` 等 |
 
-> ClickHouse 当前不作为新统计写入目标：高频小批量 INSERT 曾造成 ClickHouse CPU 高占用。现改为 Proxy 本地轻量 JSONL 日志；远程已移除 ClickHouse 容器/镜像，但 `tdai-clickhouse-data` 数据卷仍保留；如仍有历史 ClickHouse 查询需求，需先从离线包恢复镜像再查询存量数据。
+> ClickHouse 当前不作为新统计写入目标：高频小批量 INSERT 曾造成 ClickHouse CPU 高占用。现改为 Proxy 本地轻量 JSONL 日志；远程已移除 ClickHouse 容器/镜像，但 `tdai-clickhouse-data` 数据卷仍保留；如仍有历史 ClickHouse 查询需求，需先从外部源/备份重新获取并加载镜像后再查询存量数据。
 
 ### 4.5 Token / 耗时查询（轻量日志）
 
@@ -287,18 +287,19 @@ docker exec tdai-proxy sh -c "grep '\"event\":\"usage\"' /data/tdai-memory-proxy
 - **当前状态（2026-09-07 后）**
   - `.env` 设 `CLICKHOUSE_ENABLED=0`，Proxy 不再写 ClickHouse。
   - `tdai-clickhouse` 容器和 `clickhouse/clickhouse-server:24.8` 镜像已按用户确认移除。
-  - `tdai-clickhouse-data` 数据卷与 `/root/tdai-memory/images/clickhouse.tar.gz` 仍保留，可恢复。
+  - `local-before-*` 回滚镜像与 `/root/tdai-memory/images/*.tar.gz` 已按用户确认清理。
+  - `tdai-clickhouse-data` 数据卷仍保留，但当前服务器本地没有 ClickHouse 离线包。
 - **日常检查**
   ```bash
   docker ps --filter name=tdai-clickhouse      # 预期为空
   docker images | grep clickhouse              # 预期为空
   docker volume ls | grep clickhouse-data      # 应保留
-  ls -lh /root/tdai-memory/images/clickhouse.tar.gz
+  ls -lh /root/tdai-memory/images/             # 当前预期为空/不存在
   ```
 - **恢复 ClickHouse 统计写入**
   ```bash
-  # 服务器上先加载离线镜像（保留的数据卷会自动继续使用）
-  docker load -i /root/tdai-memory/images/clickhouse.tar.gz
+  # 服务器本地 tar 包已清理，需先从外部源/备份获取 ClickHouse 离线镜像
+  docker load -i /path/to/clickhouse.tar.gz
 
   # 改 .env：CLICKHOUSE_ENABLED=1
   cd /root/tdai-memory/deploy/global-images
@@ -307,7 +308,7 @@ docker exec tdai-proxy sh -c "grep '\"event\":\"usage\"' /data/tdai-memory-proxy
   ```
   注意：关闭它只是停止新写入，不会删除已存在的 ClickHouse 数据。
 - **彻底清理边界**
-  - 当前已删除的是容器和镜像，不是历史数据卷。
+  - 当前已删除的是容器、镜像、旧回滚镜像与本地 tar 包，不是历史数据卷。
   - 如需连 `tdai-clickhouse-data` 一起删除，必须由用户再次确认，不能直接 `--purge`。
   - 当前统计已走 4.5 的轻量 JSONL，不需要擅自重新启用 ClickHouse。
 
