@@ -1,7 +1,8 @@
 # L0 路由与 User/Assistant 抽取说明（Codex / Claude Code）
 
-> 状态：调研记录，当前口径。
+> 状态：调研记录 + 目标方案（2026-09-08 追加 §6/§7：用于指导**当前仍在运行的旧项目**按新口径改造）。
 > 范围：只讲“哪些请求会写 L0，以及 L0 的 User / Assistant 是怎么从原始请求/响应里抽出来的”。
+> 提示：§6 目标方案内容完整、独立可执行，改造只以本文件 §6 为准。
 > 不涉及：L0 的 SQLite/JSONL 存储、L1/L2/L3 调度、summary_tips 入库细节。
 > 关联文件：
 > - `MemoryProxy/src/server.ts`
@@ -379,3 +380,119 @@ Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Cod
 | Claude Code | main/fork/sidequery 分类 | `cache_control` + tools + thinking | 代码 |
 | Claude Code | harness wrapper 剥离 | `extractUserQueryText()` | 部分代码 |
 | Claude Code | WebSearch 内部请求 | **未修，待抓包** | 待定 |
+
+> §2–§5 为现状与历史案例基线；**目标方案见 §6，改造按 §6 执行**。
+
+---
+
+## 6. 目标方案（旧项目改造按此执行，2026-09-08）
+
+> 本章是定稿方案（2026-09-08），用于指导**旧项目**修改 L0 抽取与内部请求识别。内容完整、独立可执行，按旧项目实际（现行路由、命名、代码结构）表述；**只以本章为准**。
+> **概念统一：Codex 就是 Codex。** 旧项目 URL 路径中的 `codebuddy` 只是现行路由别名，不是独立 Agent；改造期间内部命名（adapter / 配置 / 日志）逐步从 `codebuddy`、`codexInternal` 统一为 `codex`，URL 路径可在迁移窗口内保留别名转发，但**不新增任何别名用法**。
+
+### 6.1 两层架构与判定铁律
+
+```text
+第 1 层 净化抽取（协议层，与客户端无关）
+   → 按 content block / item type 白名单抽"候选 User 文本"与"候选 Assistant 文本"
+第 2 层 回合分类（客户端层）
+   → 结构信号（硬，代码） > 前缀列表（软，配置文件） > 低置信启发式（只保留不扩展）
+   → 命中内部请求 → 不算一轮 → 不写 L0
+```
+
+铁律：**能结构就别靠文本；结构够不到的才进前缀列表；前缀命中必须打审计日志**（哪条前缀命中哪条消息，前 80 字符）。
+
+### 6.2 配置与缓存（跨 Agent 通用）
+
+- 两套前缀列表集中到一个配置文件节（替换/收编现有 `codexInternal.promptPrefixes` 与代码内嵌黑名单），作为唯一真源，**不进数据库**：
+
+```yaml
+internalRequest:
+  claudeCode: { promptPrefixes: [...] }
+  codex:       { promptPrefixes: [...] }
+```
+
+- 前缀规则：候选 User 文本开头 startsWith（先 trim）；以**特征句**为锚（Ambient 用 `Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex`，不用首行 `# Overview`）；命中即止、命中打日志；
+- 缓存：服务启动从配置构建**不可变快照**进进程缓存；改配置后**手动删缓存重建**（纯派生数据，删除安全、重建幂等、并发 miss 只建一次）；**不做**轮询 / stat 校验 / 热更新 / DB 存储；
+- 前缀只判"候选 User 文本"，不参与 Assistant 判定。
+
+### 6.3 Claude Code（Anthropic）改造
+
+**净化抽取（保持并收紧）：** assistant 只取 `content[].type=="text"`（流式只累加 `text_delta`，tool_use 只计数、thinking 跳过）；user 剔除 content 全为 `tool_result` 块的消息（混有 text 的保留）；剥离 system-reminder 等 wrapper；**压缩摘要**固定前缀命中即不算用户输入（即使它是最后一条 user）：
+
+```text
+This session is being continued from a previous conversation that ran out of context.
+```
+
+**内部请求识别（新增，按优先级）：**
+
+1. 子代理请求：第一条 system 块以 `x-anthropic-billing-header` 开头且 JSON 元数据含 `cc_is_subagent === true` → 不写 L0（CCR v3 实测实现；**块格式随版本可变，待真实抓包复核**）；辅助信号：`thinking: {"type":"disabled"}`（v2.1.166+ 子代理；主请求 adaptive/enabled，需校准）；
+2. WebSearch 内部再入：**三重结构信号** → 不写 L0（可单独计模型调用）：① system 第二段固定 `You are an assistant for performing a web search tool use`（第一段继承主对话，勿用）；② tools 含 `{"type":"web_search_20250305","name":"web_search","max_uses":8}`；③ 唯一 user 消息以 `Perform a web search for the query: ` 开头。双源独立实测一致（quercle.dev；OmniRoute issue #1882），**落地前抓一次真实 body 复核**；
+3. 现有 main/fork/sidequery（cache_control 位置 / tools=[] / thinking disabled）**定位为低置信启发式**：保留兼容，不扩展依赖、不新增基于它的新规则；
+4. headers（UA `claude-cli/…`、`anthropic-beta`、`x-app: cli`、`x-claude-code-session-id` 等）仅辅助观测，可伪造，不作唯一判据；
+5. 前缀列表 `internalRequest.claudeCode.promptPrefixes`：标题生成（community 逆向 SESSION_TITLE_PROMPT 特征，非官方，以真实 body 校准）、本地命令回执等结构覆盖不到的文本特征。
+
+**判定顺序：** ①headers 记录 → ②billing 块 `cc_is_subagent` → ③thinking disabled → ④WebSearch 三重 → ⑤main/fork/sidequery（非 main 不写 L0）→ ⑥抽取候选 User → ⑦压缩前缀 → ⑧claudeCode 前缀列表 → ⑨通过才写 L0。
+
+### 6.4 Codex 改造
+
+**净化抽取（保持并收紧）：** Responses 按 item `type` 过滤——只有 `type=message && role=user` 是用户输入候选；`function_call / function_call_output / web_search_call / reasoning / message(role=assistant)` 均非（function_call_output 无 role，按 call_id 配对）；Chat Completions 包装成 function 后同语义。流式只累加 `response.output_text.delta` / `choices[0].delta.content`，工具参数不进 L0。IDE 注入解包：命中 IDE 模板包裹时取**最后一个** `My request for` 标题后的文本为真 prompt。
+
+**内部请求识别（新增，按优先级）：**
+
+1. 结构（已有，代码级保留）：旧版 guard 精确 `{"outcome":"allow"/"deny"}`；新版 guard 含 `risk_level / user_authorization / outcome / rationale` 扩展 JSON；
+2. 前缀列表 `internalRequest.codex.promptPrefixes`（沿用现有 `codexInternal` 并补齐）：
+   - 标题生成：`You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title`
+   - 审批 transcript：`The following is the Codex agent history whose request action you are assessing`、`The following is the Codex agent history added since your last approval assessment`
+   - **Ambient Suggestions（新增条目）**：`Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex`
+3. Ambient 专项状态：仅文本前缀可用，无公开结构信号；OSS codex 源码该提示词已消失（疑似移往 Desktop/服务端，可能漂移）。**待办：抓一次真实 Ambient 请求 body**，确认三点——① instructions/system 有无稳定结构；② input[] 是否缺少"本轮新鲜 user 输入"（有 → 可升格结构信号）；③ 是否透传 `thread_source=system` / `request_kind=turn`（社区实测有此元数据，是否透传到本网关无证据）。抓到结构 → 升格 1；抓不到 → 维持 2。
+
+**判定顺序：** ①guard 精确 JSON → ②抽取候选 User（item type + IDE 解包）→ ③codex 前缀列表 → ④通过才写 L0。
+
+**已知取舍：** 真实用户消息恰好以某前缀开头会被误过滤（概率极低）——命中日志 + 配置注释知会团队。
+
+### 6.5 新增 Agent 产品的接入指引（简版）
+
+```text
+1. 确认 API 形态：Anthropic Messages → 净化和分类复用 §6.3；
+   OpenAI Responses / Chat Completions → 复用 §6.4；其他格式 → 按同一两层设计新写
+2. 抓真实样本留档：主对话 ≥3 个 + 该产品所有内部请求（标题/审批/后台建议/搜索/子代理/压缩）各 ≥1
+3. 逐个内部请求做结构信号检查：
+   □ 专用 system 段/特征句  □ 专用 server tool 类型  □ 专用标记字段（如 cc_is_subagent）
+   □ thinking 是否 disabled  □ cache_control/tools/max_tokens 差异  □ headers 专属值（可伪造，仅辅助）
+   □ 消息组合：input[] 是否缺少"本轮新鲜 user 输入"（纯旧历史回放 = 强信号）
+4. 归类：稳定结构 → 写代码硬规则；仅文本 → 该 Agent 前缀配置节；都无 → 暂不识别并记录
+5. 验证：合成冒烟 + 真实运行观察 L0；误伤审计（命中日志）
+6. 沉淀：登记 §6.6，内部请求类型写进该 Agent 配置节注释
+```
+
+### 6.6 当前使用的 Agent 产品（旧项目现状）
+
+| Agent | 现行入口 | 已知内部请求类型 | 收口状态（改造后） |
+|---|---|---|---|
+| **Codex**（= 现行 `codebuddy` 路由别名，概念统一为 Codex） | `/codebuddy/default/v1/responses`（Responses，实走） | 旧/新 guard、标题生成、审批 transcript、**Ambient** | guard 已收口；标题/审批已收口；**Ambient 待抓包收口** |
+| **Claude Code** | `/v1/messages`、`/:agent/:spaceId/v1/messages` | WebSearch 再入、压缩摘要、标题生成、fork/sidequery/subagent | WebSearch 三重信号待复核收口；压缩前缀待加；子代理标记待复核 |
+| OpenAI 兼容兜底 | `POST /*` catch-all | 无专属清单 | 仅结构过滤；新网关将删除 catch-all，旧项目不扩大其用法 |
+
+> cc-switch 仅作代理前端/配置切换器，代理层不抽取内容（已调研核实），不参与本方案。
+> 除上述两类外当前无其他 Agent 产品接入；新增按 §6.5 执行。
+
+### 6.7 改造待办闭环（落地前逐项完成）
+
+1. 抓 Claude Code WebSearch 真实请求原始 body → 复核三重信号；
+2. 抓 Claude Code 子代理（Agent/Task）真实请求 → 确认 billing 块 `cc_is_subagent` 实际形态、主请求 thinking 实际取值；
+3. 抓 Codex Ambient 真实请求 body → 按 §6.4-3 三点决定升格结构 or 维持前缀；
+4. 用真实 body 校准 §6.3/§6.4 各前缀条目的首行形态（含标题生成 prompt 当前版本）；
+5. 合成冒烟 + 真实运行验证 L0 干净后，将 §4 未修项逐条闭环、§6.6 收口状态置为"已收口"。
+
+---
+
+## 7. 主要依据（调研来源，2026-09-08）
+
+- cc-switch（Session Manager 块级净化手法）：github.com/farion1231/cc-switch —— `session_manager/providers/claude.rs`、`codex.rs`、`utils.rs`（代理层只记元数据不抽文本，已核实）
+- claude-code-router（cc_is_subagent 判定）：`packages/core/src/gateway/claude-code-router-plugin.ts`
+- Claude Code WebSearch 双源实测：quercle.dev/blog/claude-code-web-tools、github.com/diegosouzapw/OmniRoute/issues/1882
+- 压缩摘要固定前缀实录：github.com/anthropics/claude-code/issues/82509
+- 子代理 thinking disabled：github.com/anthropics/claude-code/issues/65863；fork 与主请求结构同构：issues/88755
+- Codex Ambient 社区实测（thread_source=system 等）：community.openai.com/t/1385208
+- headers 抓包实录：anthropics/claude-agent-sdk-python/issues/335

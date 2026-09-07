@@ -574,8 +574,9 @@ tips:
   sessionTtlSeconds: 7200        # 阶段不活跃超过该秒数后视为新阶段
 
 # ── Codex 内部请求识别 ─────────────────────────────────────────────────────
-# Codex 会通过同一 /responses 路径发送标题生成、安全审批等内部请求。
-# 这些请求的 User prompt 里带完整 transcript（含工具调用/结果），不能写入 L0。
+# Codex 会通过同一 /responses 路径发送标题生成、安全审批、Ambient Suggestions
+# 等内部请求。这些请求的 User prompt 里带完整 transcript（含工具调用/结果），
+# 不能写入 L0。
 # 当最后一条 User 消息以以下任意前缀开头时，proxy 会跳过 L0 写入。
 #
 # 重要：真实用户对话不要使用这些前缀作为开头，否则会被当作 Codex 内部请求过滤。
@@ -584,6 +585,10 @@ codexInternal:
     - "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title"
     - "The following is the Codex agent history whose request action you are assessing"
     - "The following is the Codex agent history added since your last approval assessment"
+    # Ambient Suggestions：当前实际请求以 "# Overview" 开头，再接特征句。
+    # 两条都保留：完整版覆盖当前格式；特征句兜底未来如果开头变化/净化层先剥标题。
+    - "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex"
+    - "Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex"
 
 skillRuntime:
   allowLlmWrite: true            # 是否允许主模型创建/修改 skill（默认 true；按需改为 false 只读）

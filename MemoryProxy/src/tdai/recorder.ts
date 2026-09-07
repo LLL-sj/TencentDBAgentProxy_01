@@ -71,11 +71,23 @@ function isNewCodexGuardSession(messages: unknown[]): boolean {
   return false;
 }
 
-/** 检查文本是否命中 Codex 内部 prompt 前缀（标题生成 / 审批 transcript）。 */
+/** 检查文本是否命中 Codex 内部 prompt 前缀（标题生成 / 审批 transcript / Ambient）。 */
 function isCodexInternalPrompt(text: string, promptPrefixes: readonly string[]): boolean {
   if (!text || promptPrefixes.length === 0) return false;
   const trimmed = text.trimStart();
-  return promptPrefixes.some((prefix) => prefix.length > 0 && trimmed.startsWith(prefix));
+  const candidates = [trimmed];
+
+  // Ambient Suggestions 实际文本以 "# Overview" 开头，再进入特征句。
+  // 为了允许配置里只写特征句（Generate 0 to 3 ...），也把首个 Markdown
+  // 标题行剥掉后再匹配一次；真实用户输入很少以这类完整特征句开头。
+  if (trimmed.startsWith("#")) {
+    const afterFirstLine = trimmed.split("\n").slice(1).join("\n").trimStart();
+    if (afterFirstLine) candidates.push(afterFirstLine);
+  }
+
+  return promptPrefixes.some((prefix) =>
+    prefix.length > 0 && candidates.some((candidate) => candidate.startsWith(prefix)),
+  );
 }
 
 // ── Session 级 L0 去重 ─────────────────────────────────────────────────────

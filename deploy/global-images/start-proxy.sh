@@ -93,13 +93,15 @@ fi
 
 bool() { [[ "$1" == "1" ]] && echo "true" || echo "false"; }
 
-# Codex 内部请求 prompt 前缀（标题生成 / 安全审批）。真实用户对话不要使用这些前缀。
+# Codex 内部请求 prompt 前缀（标题生成 / 安全审批 / Ambient Suggestions）。真实用户对话不要使用这些前缀。
 # 如需覆盖，在 .env 设置 MEMORY_CODEX_INTERNAL_PROMPT_PREFIXES，用 | 分隔多个前缀。
 CODEX_INTERNAL_PROMPT_PREFIXES="${MEMORY_CODEX_INTERNAL_PROMPT_PREFIXES:-}"
 if [[ -z "$CODEX_INTERNAL_PROMPT_PREFIXES" ]]; then
   CODEX_INTERNAL_PROMPT_PREFIXES_YAML='    - "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title"
     - "The following is the Codex agent history whose request action you are assessing"
-    - "The following is the Codex agent history added since your last approval assessment"'
+    - "The following is the Codex agent history added since your last approval assessment"
+    - "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex"
+    - "Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex"'
 else
   CODEX_INTERNAL_PROMPT_PREFIXES_YAML="$(
     printf '%s' "$CODEX_INTERNAL_PROMPT_PREFIXES" | tr '|' '\n' | sed '/^[[:space:]]*$/d' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | while IFS= read -r prefix; do

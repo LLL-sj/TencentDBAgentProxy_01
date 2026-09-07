@@ -145,13 +145,17 @@ export const DEFAULT_CONFIG: ProxyConfig = {
     timeReminderSeconds: 600,
     sessionTtlSeconds: 10800,
   },
+
   codexInternal: {
     promptPrefixes: [
       "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title",
       "The following is the Codex agent history whose request action you are assessing",
       "The following is the Codex agent history added since your last approval assessment",
+      "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex",
+      "Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex",
     ],
   },
+
   auth: {
     enabled: false,
     url: "",
