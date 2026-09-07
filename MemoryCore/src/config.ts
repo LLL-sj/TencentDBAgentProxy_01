@@ -617,7 +617,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
     extraction: {
       enabled: bool(extractionGroup, "enabled") ?? true,
       enableDedup: bool(extractionGroup, "enableDedup") ?? true,
-      maxMemoriesPerSession: num(extractionGroup, "maxMemoriesPerSession") ?? 20,
+      maxMemoriesPerSession: num(extractionGroup, "maxMemoriesPerSession") ?? 10,
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
     },

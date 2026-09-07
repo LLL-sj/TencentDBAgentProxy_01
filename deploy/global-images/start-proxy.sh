@@ -33,6 +33,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # proxy SQLite（sessions / tips_reminder_state / hook_cache）必须持久化。
 # 默认 named volume；可在 .env 用 PROXY_VOLUME 覆盖。
 PROXY_VOLUME="${PROXY_VOLUME:-tdai-proxy-data}"
+# Proxy 轻量结构化日志目录。默认写到 proxy 数据卷，避免依赖 ClickHouse 后
+# 没有 Token/耗时可查。可通过 .env 里 PROXY_LOG_FILE= 显式留空关闭文件日志。
+PROXY_LOG_FILE="${PROXY_LOG_FILE-/data/tdai-memory-proxy/logs}"
 
 # 服务器模式：镜像已包含全部源码，默认不挂载仓库源码；本地开发热更新才设为 1。
 DEV_SOURCE_MOUNTS="${TDAI_DEV_SOURCE_MOUNTS:-0}"

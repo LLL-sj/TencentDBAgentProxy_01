@@ -73,8 +73,11 @@ export class FileLogger {
   }
 
   /**
-   * Write a log line.
-   * Format: [ISO_TIMESTAMP][LEVEL] message {json_data}
+   * Write a log line as one-line JSON.
+   * Format: {"timestamp":"ISO_TIMESTAMP","level":"LEVEL","event":"message","data":{...}}
+   *
+   * Using JSONL instead of prefix text makes proxy.log machine-readable without
+   * regex work; downstream scripts can parse every line with JSON.parse.
    */
   write(level: string, message: string, data?: Record<string, unknown>): void {
     if (this.disabled) return;
@@ -140,18 +143,24 @@ export class FileLogger {
 
   private formatLine(level: string, message: string, data?: Record<string, unknown>): string {
     const timestamp = new Date().toISOString();
-    let line = `[${timestamp}][${level}] ${message}`;
+
+    // Always emit a full JSON object per line. Nested data avoids collisions
+    // with the reserved timestamp/level/event fields.
+    const record: Record<string, unknown> = {
+      timestamp,
+      level,
+      event: message,
+    };
 
     if (data && Object.keys(data).length > 0) {
-      // Sort keys for stable output (easier to grep/diff)
       const sorted: Record<string, unknown> = {};
       for (const key of Object.keys(data).sort()) {
         sorted[key] = data[key];
       }
-      line += ` ${JSON.stringify(sorted)}`;
+      record.data = sorted;
     }
 
-    return line + "\n";
+    return JSON.stringify(record) + "\n";
   }
 
   private initFile(): void {

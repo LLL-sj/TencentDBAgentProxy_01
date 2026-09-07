@@ -72,7 +72,7 @@ const TAG = "[memory-tdai] [pipeline-factory]";
 // Previous value of 20 caused the extractor's slice(-10) to silently
 // truncate the first 5 rows per batch. Trade-off: drain rounds double
 // under backlog, but zero data loss.
-export const L1_BATCH_PROCESS = 10;
+export const L1_BATCH_PROCESS = 25;
 export const L1_BATCH_QUERY = L1_BATCH_PROCESS * 2;
 
 function supportsProfileSyncWrite(store?: IMemoryStore): boolean {

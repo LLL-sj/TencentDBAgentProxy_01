@@ -90,7 +90,7 @@ memory:
   extraction:
     enabled: true
     enableDedup: true
-    maxMemoriesPerSession: 20
+    maxMemoriesPerSession: ${MEMORY_L1_MAX_MEMORIES_PER_SESSION:-10}
   persona:
     triggerEveryN: ${MEMORY_L3_TRIGGER_EVERY_N:-10}
     maxScenes: 15
@@ -148,6 +148,8 @@ skill:
   extraction:
     enabled: true
     maxIterations: 16
+    toolCallThreshold: ${MEMORY_SKILL_TOOL_CALL_THRESHOLD:-15}
+    archiveBytes: ${MEMORY_SKILL_ARCHIVE_BYTES:-61440}
     queue:
       backend: local
       keyPrefix: tdai
