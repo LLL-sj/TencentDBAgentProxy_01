@@ -26,6 +26,7 @@
 | `L0_ROUTING_AND_EXTRACTION.md` | Codex / Claude Code 的 L0 路由与 User/Assistant 抽取 |
 | `TEAM_NOTES.md` | Team Notes 机制与编码校验 |
 | `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md` | 后续记忆/Skill 统一方案指导（目标设计，尚未整体实现） |
+| `HANDOFF_MEMORY_PARAMETER_UNIFICATION_20260907.md` | 当前活动交接：记忆参数与统一模型改造实施手册 |
 | `ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`） |
 | `../deploy/global-images/.env.example` | 全部部署参数模板 |
 | `../deploy/global-images/start-*.sh` / `stop-all.sh` | 启动、停止、卷管理脚本 |
@@ -152,7 +153,7 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
   - Skill：`toolCallThreshold=15`、`archiveBytes=61440`
   - 远程 `.env`：`MEMORY_L1_IDLE_TIMEOUT_SECONDS=300`、`MEMORY_L2_DELAY_AFTER_L1_SECONDS=120`、`MEMORY_SESSION_ACTIVE_WINDOW_HOURS=2`、`MEMORY_L3_TRIGGER_EVERY_N=7`
 - 仍为 chat/code 共用全局参数；未做 per-mode 独立触发。
-- 后续较重任务：按 `memory_mode=chat|code` 拆分触发参数；L3 触发改由 L2 文件变化驱动；L2/Skill 统一“多文件维护模型”；L3 统一拆成索引自动重建 + LLM/用户维护总结。完整目标设计见 `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md`。
+- 后续较重任务：按 `memory_mode=chat|code` 拆分触发参数；L3 触发改由 L2 文件变化驱动；L2/Skill 统一“多文件维护模型”；L3 统一拆成索引自动重建 + LLM/用户维护总结。完整目标设计见 `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md`，实施交接见 `HANDOFF_MEMORY_PARAMETER_UNIFICATION_20260907.md`。
 
 ---
 

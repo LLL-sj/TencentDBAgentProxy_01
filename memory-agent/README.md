@@ -16,6 +16,7 @@
 | `TEAM_NOTES.md` | Team Notes 机制：定位、功能、数据模型、接口、编码校验、写权限 | 排查 Team Notes 问题时读 |
 | `MAINTENANCE_AND_CHANGELOG.md` | **历史修改与交接的唯一档案**：全部轮次、经验与坑、剩余问题 | 查历史背景/剩余待办时读 |
 | `INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md` | **后续记忆/Skill 统一方案指导**：L0-L3 与 Skill 同构、per-mode 参数、L3 拆分等 | 准备推进记忆/Skill 架构改造前读 |
+| `HANDOFF_MEMORY_PARAMETER_UNIFICATION_20260907.md` | **当前活动交接/实施手册**：记忆参数已改内容、未完成重任务、建议实施顺序 | 下一轮开始做记忆参数统一改造时先读 |
 | `ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`）：第一阶段部署/Codex 接入/L0 guard 等问题与解决 | 排查同类问题时读 |
 | `prompts/` | chat / code / code-v2 / shared 提示词与说明 | 修改提示词时读 |
 
@@ -62,6 +63,7 @@ memory-agent/
 ├── TEAM_NOTES.md                             # Team Notes 机制
 ├── MAINTENANCE_AND_CHANGELOG.md              # 历史修改与交接档案（原 FINAL.md）
 ├── INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md  # 后续记忆/Skill 统一方案指导
+├── HANDOFF_MEMORY_PARAMETER_UNIFICATION_20260907.md # 当前活动交接：记忆参数统一改造实施手册
 ├── ISSUES_AND_RESOLUTIONS.md                 # 问题汇总与排障（原 问题汇总.md）
 └── prompts/                                  # chat/code/code-v2/shared 提示词
     ├── README.md

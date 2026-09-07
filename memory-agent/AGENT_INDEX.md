@@ -424,6 +424,7 @@ docker tag agentmemory/memory-hub:local agentmemory/memory-hub:local-backup-YYYY
 | `memory-agent/TEAM_NOTES.md` | Team Notes 机制 |
 | `memory-agent/MAINTENANCE_AND_CHANGELOG.md` | **历史修改与交接的唯一档案**：历史轮次、经验、剩余问题（原 `FINAL.md`） |
 | `memory-agent/INVESTIGATION_MEMORY_AND_SKILL_FLOW_20260907.md` | 后续记忆/Skill 统一方案指导（目标设计，尚未整体实现） |
+| `memory-agent/HANDOFF_MEMORY_PARAMETER_UNIFICATION_20260907.md` | 当前活动交接：记忆参数与统一模型改造的实施手册 |
 | `memory-agent/ISSUES_AND_RESOLUTIONS.md` | 问题汇总与排障记录（原 `问题汇总.md`） |
 
 ### 8.2 部署与配置
