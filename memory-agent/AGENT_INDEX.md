@@ -94,6 +94,8 @@ MEMORY_PROXY_PUBLIC_BASE_URL=http://<服务器IP或域名>:8096
 MEMORY_HUB_PROXY_PUBLIC_URL=http://<服务器IP或域名>:8096
 ```
 
+> 当前远程服务器（2026-09-08）的兜底模型：`PROXY_UPSTREAM_MODEL=qwen3.8-flash`。若再换兜底模型，直接改 `.env` 后执行 `./start-proxy.sh` 即可。
+
 ### 2.4 服务器运行模式（关键）
 
 `.env.example` 默认就是服务器模式：

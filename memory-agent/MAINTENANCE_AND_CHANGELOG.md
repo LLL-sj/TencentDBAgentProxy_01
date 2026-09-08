@@ -1,7 +1,7 @@
 # MAINTENANCE_AND_CHANGELOG.md — TencentDB-Agent-Memory 历史修改与长期维护记录（原 FINAL.md）
 
 > 更新日期：2026-09-08
-> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入，并经用户确认移除容器/镜像及旧回滚镜像/tar 包，数据卷保留；Codex Ambient Suggestions L0 过滤已部署，污染 L0/L1 已清理。
+> 状态：`tdai-memory-core` / `tdai-memory-hub` / `tdai-proxy` healthy；远程 Proxy 已切换为轻量 JSONL 日志；ClickHouse 已停止新写入，并经用户确认移除容器/镜像及旧回滚镜像/tar 包，数据卷保留；Codex Ambient Suggestions L0 过滤已部署，污染 L0/L1 已清理；上游兜底模型已切换为 qwen3.8-flash。
 > Git：相关改动已提交并推送到 `feat/server_team`。
 > 本文是“历史修改 + 交接”的唯一档案。此前零散 handoff/执行计划/报告已清理，不再单独维护。
 >
@@ -173,6 +173,16 @@ TencentDB-Agent-Memory 是面向 Coding Agent 的记忆系统：
   - 真实会话 `01a07bd8-988f-7dd0-aab4-ab9be9301f97` 保留；
   - 清理前备份：`/root/tdai-memory/backups/l0-cleanup-20260908-024410/`。
 - **剩余事项**：仍建议按 `L0_ROUTING_AND_EXTRACTION_NEW.md` 抓 Ambient 原始 body，尝试将文本前缀升格为结构信号；旧的 WebSearch 等污染问题仍按 §5.1 继续处理。
+
+### 3.16 上游兜底模型切换为 qwen3.8-flash
+
+> 日期：2026-09-08；范围：远程/本地 Proxy 兜底模型。
+
+- 将 `PROXY_UPSTREAM_MODEL` 从 `gpt-5.6-luna` 切换为 `qwen3.8-flash`。
+- 先直接请求上游验证 `qwen3.8-flash` 返回 `HTTP 200`，确认可用后再切换。
+- 已更新本地 `.env` 与远程 `.env`，并重启远程 `tdai-proxy`。
+- 远程生成的 `.proxy-config/config.yaml` 中 `defaultModel` 已变为 `qwen3.8-flash`，`tdai-proxy` healthy。
+- 说明：客户端显式带 model 时仍透传客户端模型；只有客户端不带 model 时才使用该兜底模型。
 
 ---
 
