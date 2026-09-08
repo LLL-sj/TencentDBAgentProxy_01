@@ -186,8 +186,6 @@ docker logs tdai-proxy -f | grep -i "关键词"                        # 确认�
 
     配置优先级：客户端 `body.model`（透传）> `.env` `PROXY_UPSTREAM_MODEL`（兜底）> 空字符串。
 
-    > 当前兜底模型（2026-09-08）：`PROXY_UPSTREAM_MODEL=qwen3.8-flash`。切换前已验证上游 `HTTP 200`，远程 proxy 已重启并应用新默认模型。
-
 ### 5.2 OpenAI 协议请求路由
 
 **状态**：✅ 已解决（2026-08-12）
